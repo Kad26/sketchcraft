@@ -8,6 +8,7 @@ export type WorkspaceId = "model" | "arch" | "design" | "previz";
 /** where the tool bar sits: floating along the bottom, down the left, or
  * "classic": docked edge to edge above the model, like SketchUp */
 export type Dock = "bottom" | "left" | "classic";
+export type Layout = "classic" | "floating" | "side";
 export type LeftTab = "outliner" | "library" | "views";
 
 export interface Workspace {
@@ -138,9 +139,8 @@ export function cleanEdits(raw: unknown): Partial<Record<WorkspaceId, WorkspaceE
   return out;
 }
 
-/** A workspace with your changes. `layout` "classic" docks every workspace's
- * tool bar above the model unless you chose otherwise for that workspace. */
-export function withEdits(w: Workspace, e: WorkspaceEdits | undefined, layout: "classic" | "floating" = "floating"): Workspace {
-  const base = layout === "classic" ? { ...w, dock: "classic" as Dock } : w;
-  return e ? { ...base, ...e } : base;
+/** A workspace with your changes. A per-workspace dock overrides the layout default. */
+export function withEdits(w: Workspace, e: WorkspaceEdits | undefined, layout: Layout = "floating"): Workspace {
+  const dock = layout === "classic" ? "classic" : layout === "side" ? "left" : w.dock;
+  return { ...w, dock, ...e };
 }

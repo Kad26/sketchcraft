@@ -5,8 +5,10 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode }
 import { Icons } from "./icons";
 import { TOOL_INFO } from "./workspace";
 import { skinIcon } from "./skins";
+import { verticalToolIcon } from "./vertical-tool-icons";
 
 type ToolId = keyof typeof TOOL_INFO;
+type ToolIconStyle = "default" | "workshop";
 
 /** Buttons plugins add (id "plugin:<plugin>:<command>"): set by the Toolbar each render. */
 export interface ExtraButton {
@@ -19,11 +21,12 @@ let EXTRA = new Map<string, ExtraButton>();
 
 const info = (id: string) => (EXTRA.has(id) ? { name: `${EXTRA.get(id)!.name} (plugin)`, key: "" } : TOOL_INFO[id as ToolId]);
 /** The tool's icon: the worn skin's own image if it has one, else the built-in. */
-const icon = (id: string) => {
+const icon = (id: string, style: ToolIconStyle) => {
   const ex = EXTRA.get(id);
   if (ex) return <img className="skin-icon plugin-icon" src={ex.icon} alt="" draggable={false} />;
   const img = skinIcon(id);
-  return img ? <img className="skin-icon" src={img} alt="" draggable={false} /> : Icons[id as keyof typeof Icons]?.();
+  if (img) return <img className="skin-icon" src={img} alt="" draggable={false} />;
+  return (style === "workshop" ? verticalToolIcon(id) : undefined) ?? Icons[id as keyof typeof Icons]?.();
 };
 
 export function Toolbar({
@@ -34,6 +37,7 @@ export function Toolbar({
   onCustomize,
   children,
   extra = [],
+  iconStyle = "default",
 }: {
   groups: string[][];
   tool: string;
@@ -45,6 +49,7 @@ export function Toolbar({
   children?: ReactNode;
   /** plugin buttons, in their own group at the end */
   extra?: ExtraButton[];
+  iconStyle?: ToolIconStyle;
 }) {
   EXTRA = new Map(extra.map((b) => [b.id, b]));
   const groups = useMemo(() => (extra.length ? [...toolGroups, extra.map((b) => b.id)] : toolGroups), [toolGroups, extra]);
@@ -112,7 +117,7 @@ export function Toolbar({
             const t = info(id);
             return (
               <button key={id} className={`tool ${tool === id ? "on" : ""}`} onClick={() => choose(id)} title={t.key ? `${t.name} (${t.key})` : t.name} aria-label={t.name}>
-                {icon(id)}
+                {icon(id, iconStyle)}
               </button>
             );
           })}
@@ -129,7 +134,7 @@ export function Toolbar({
           >
             {activeHidden ? (
               <>
-                {icon(tool)}
+                {icon(tool, iconStyle)}
                 <span className="more-n">+{hidden.length - 1}</span>
               </>
             ) : (
@@ -140,6 +145,7 @@ export function Toolbar({
             <MoreTools
               ids={hidden}
               tool={tool}
+              iconStyle={iconStyle}
               choose={(id) => {
                 choose(id);
                 setOpen(false);
@@ -159,7 +165,16 @@ export function Toolbar({
 }
 
 /** The tools that didn't fit, with a search box: type, then Enter for the first match. */
-function MoreTools({ ids, tool, choose, onCustomize, onClose }: { ids: string[]; tool: string; choose: (id: string) => void; onCustomize: () => void; onClose: () => void }) {
+function MoreTools({
+  ids, tool, iconStyle, choose, onCustomize, onClose,
+}: {
+  ids: string[];
+  tool: string;
+  iconStyle: ToolIconStyle;
+  choose: (id: string) => void;
+  onCustomize: () => void;
+  onClose: () => void;
+}) {
   const [q, setQ] = useState("");
   const [at, setAt] = useState(0);
   const box = useRef<HTMLDivElement>(null);
@@ -201,7 +216,7 @@ function MoreTools({ ids, tool, choose, onCustomize, onClose }: { ids: string[];
           const t = info(id);
           return (
             <button key={id} role="option" aria-selected={i === at} className={`${i === at ? "at" : ""} ${tool === id ? "on" : ""}`} onMouseEnter={() => setAt(i)} onClick={() => choose(id)}>
-              {icon(id)}
+              {icon(id, iconStyle)}
               <span>{t.name}</span>
               {t.key && <kbd>{t.key}</kbd>}
             </button>

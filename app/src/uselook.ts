@@ -1,8 +1,7 @@
-// How the window looks and is laid out, remembered between launches: the skin, the classic or
-// floating layout, and the workspace with its customizations.
+// Skin, layout and workspace customizations, remembered between launches.
 import { useEffect, useState } from "react";
 import { applySkin, readSkin, SKINS, store, type Skin } from "./skins";
-import { cleanEdits, WORKSPACES, withEdits, type WorkspaceEdits, type WorkspaceId } from "./workspace";
+import { cleanEdits, WORKSPACES, withEdits, type Layout, type WorkspaceEdits, type WorkspaceId } from "./workspace";
 import type { Styles, Tool } from "./Viewport";
 
 /** the skin you wore last time (a built-in by id, or a saved one by its data) */
@@ -27,7 +26,6 @@ function rememberedEdits(): Partial<Record<WorkspaceId, WorkspaceEdits>> {
   }
 }
 
-export type Layout = "classic" | "floating";
 export type Tab = "outliner" | "library" | "views";
 
 export function useLook({ tool, chooseTool, setStyles, setTab }: {
@@ -49,12 +47,11 @@ export function useLook({ tool, chooseTool, setStyles, setTab }: {
   };
   const [wsId, setWsId] = useState<WorkspaceId>(() => (WORKSPACES.some((w) => w.id === store.get("sketchcraft.workspace")) ? (store.get("sketchcraft.workspace") as WorkspaceId) : "model"));
   const [wsEdits, setWsEdits] = useState(rememberedEdits);
-  // classic (docked, SketchUp-like, the default) or floating (SketchCraft's own)
-  const [layout, setLayoutState] = useState<"classic" | "floating">(() => {
+  const [layout, setLayoutState] = useState<Layout>(() => {
     const v = store.get("sketchcraft.layout");
-    return v === "classic" || v === "floating" ? v : (rememberedSkin().layout ?? "classic");
+    return v === "classic" || v === "floating" || v === "side" ? v : (rememberedSkin().layout ?? "classic");
   });
-  const setLayout = (l: "classic" | "floating") => {
+  const setLayout = (l: Layout) => {
     setLayoutState(l);
     store.set("sketchcraft.layout", l);
     // the layout applies everywhere: drop per-workspace tool bar placements

@@ -20,6 +20,43 @@
   display: none;
 }
 
+.app.panels-right {
+  grid-template-columns: minmax(0, 1fr) clamp(185px, 24vw, 288px);
+  grid-template-rows: 52px minmax(0, 3fr) minmax(0, 2fr);
+}
+
+.app.panels-right.no-left.no-right {
+  grid-template-columns: minmax(0, 1fr) 0;
+}
+
+.app.panels-right .stage {
+  grid-column: 1;
+  grid-row: 2 / -1;
+}
+
+.app.panels-right .panel.left,
+.app.panels-right .panel.right {
+  grid-column: 2;
+  min-height: 0;
+}
+
+.app.panels-right .panel.left {
+  grid-row: 2;
+  border-right: 0;
+  border-left: 1px solid var(--line);
+}
+
+.app.panels-right .panel.right {
+  grid-row: 3;
+  border-top: 1px solid var(--line);
+}
+
+.app.panels-right.no-right .panel.left,
+.app.panels-right.no-left .panel.right {
+  grid-row: 2 / -1;
+  border-top: 0;
+}
+
 .app.dock-left .toolbar {
   left: 14px;
   top: 14px;

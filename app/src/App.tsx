@@ -566,7 +566,7 @@ export default function App() {
   const selCount = selIds(sel).length;
 
   return (
-    <div className={`app ${ws.showLeft ? "" : "no-left"} ${ws.showRight ? "" : "no-right"} ${ws.dock === "left" ? "dock-left" : ws.dock === "classic" ? "dock-classic" : ""}`}>
+    <div className={`app ${ws.showLeft ? "" : "no-left"} ${ws.showRight ? "" : "no-right"} ${ws.dock === "left" ? "dock-left" : ws.dock === "classic" ? "dock-classic" : ""} ${layout === "side" ? "panels-right" : ""}`}>
       <header className="topbar" data-tauri-drag-region>
         <div className="brand" data-tauri-drag-region>
           <Logo />
@@ -705,7 +705,7 @@ export default function App() {
         />
         {matching && <MatchPhoto src={matching.src} width={matching.width} height={matching.height} defaultName={`Photo ${(scene?.views.filter((v) => v.photo).length ?? 0) + 1}`} onDone={finishMatch} onCancel={() => setMatching(null)} />}
 
-        <Toolbar groups={ws.tools} tool={tool} choose={(id) => chooseTool(id as Tool)} vertical={ws.dock === "left"} onCustomize={() => setShowWs(true)} extra={pluginButtons}>
+        <Toolbar groups={ws.tools} tool={tool} choose={(id) => chooseTool(id as Tool)} vertical={ws.dock === "left"} iconStyle={layout === "side" ? "workshop" : "default"} onCustomize={() => setShowWs(true)} extra={pluginButtons}>
           <label className="chip" style={{ background: hex(color) }} title="Paint color">
             <input type="color" value={hex(color)} onChange={(e) => (setColor(unhex(e.target.value)), chooseTool("paint"))} />
           </label>

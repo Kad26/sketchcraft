@@ -9,7 +9,7 @@ import { exec } from "./engine";
 import { Icons } from "./icons";
 import { iconOk, isDark, readSkin, SKINS, TOKEN_LABELS, TOKENS, type Skin, type SkinToken } from "./skins";
 import type { Tool } from "./Viewport";
-import { TOOL_INFO, WORKSPACES, type Workspace, type WorkspaceEdits } from "./workspace";
+import { TOOL_INFO, WORKSPACES, type Layout, type Workspace, type WorkspaceEdits } from "./workspace";
 import { Sheet, useEscapeToClose } from "./sheet";
 
 /** the tools an icon set can cover (its files are named after these) */
@@ -30,7 +30,18 @@ function Mini({ s }: { s: Skin }) {
 }
 
 /** A tiny drawing of a layout: where the tool bars sit around the model. */
-function LayoutMini({ kind }: { kind: "classic" | "floating" }) {
+function LayoutMini({ kind }: { kind: Layout }) {
+  if (kind === "side") {
+    return (
+      <svg className="layout-mini" viewBox="0 0 120 72" aria-hidden="true">
+        <rect x="0.5" y="0.5" width="119" height="71" rx="5" className="lm-frame" />
+        <rect x="1" y="1" width="91" height="70" className="lm-model" />
+        <rect x="5" y="5" width="11" height="61" rx="2" className="lm-float" />
+        <rect x="92" y="1" width="27" height="70" className="lm-panel" />
+        <path d="M92 1v70M92 39h27" className="lm-bar2" />
+      </svg>
+    );
+  }
   return (
     <svg className="layout-mini" viewBox="0 0 120 72" aria-hidden="true">
       <rect x="0.5" y="0.5" width="119" height="71" rx="5" className="lm-frame" />
@@ -65,8 +76,8 @@ export function AppearanceDialog({
   onPick: (s: Skin, useBackdrop: boolean) => void;
   onClose: () => void;
   onToast: (t: string, bad?: boolean) => void;
-  layout: "classic" | "floating";
-  onLayout: (l: "classic" | "floating") => void;
+  layout: Layout;
+  onLayout: (l: Layout) => void;
 }) {
   const [mine, setMine] = useState<Skin[]>([]);
   const [dir, setDir] = useState("");
@@ -182,6 +193,7 @@ export function AppearanceDialog({
                 [
                   ["classic", "Classic", "Tool bars docked above the model, like SketchUp"],
                   ["floating", "Floating", "SketchCraft's own: tool bars float over the model"],
+                  ["side", "Vertical tools", "Tools on the left, Outliner and properties on the right"],
                 ] as const
               ).map(([id, name, about]) => (
                 <button key={id} role="radio" aria-checked={layout === id} className={`layout-card${layout === id ? " on" : ""}`} onClick={() => onLayout(id)}>
@@ -322,14 +334,14 @@ export function WorkspaceDialog({ ws, onChange, onReset, onClose }: { ws: Worksp
           <option value="left">Down the left side</option>
           <option value="classic">Classic: docked above the model</option>
         </select>
-        <span>Left panel</span>
+        <span>Navigation panel</span>
         <select className="units-select" value={ws.showLeft ? ws.leftTab : "off"} onChange={(e) => (e.target.value === "off" ? onChange({ showLeft: false }) : onChange({ showLeft: true, leftTab: e.target.value as Workspace["leftTab"] }))}>
           <option value="outliner">Shown, on Outliner</option>
           <option value="library">Shown, on Library</option>
           <option value="views">Shown, on Views</option>
           <option value="off">Hidden</option>
         </select>
-        <span>Right panel</span>
+        <span>Properties panel</span>
         <select className="units-select" value={ws.showRight ? "on" : "off"} onChange={(e) => onChange({ showRight: e.target.value === "on" })}>
           <option value="on">Shown</option>
           <option value="off">Hidden</option>
