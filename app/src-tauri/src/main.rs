@@ -39,10 +39,10 @@ fn guarded<T>(f: impl FnOnce() -> T, fallback: impl FnOnce(String) -> T) -> T {
 /// SketchUp Ruby): those run under the plugin allowlist in `sketchcraft::policy`
 /// (modeling only: no files, programs, network or plugin management).
 #[tauri::command]
-fn exec(state: tauri::State<App>, cmd: Value, source: Option<String>) -> Value {
+fn exec(state: tauri::State<App>, cmd: Value, source: Option<String>, plugin: Option<String>) -> Value {
     let caller = if source.as_deref() == Some("plugin") { sketchcraft::policy::Caller::Plugin } else { sketchcraft::policy::Caller::Ui };
     let mut live = engine(&state);
-    guarded(|| live.exec_as(&caller, &cmd), |msg| serde_json::json!({"ok": false, "error": format!("SketchCraft hit a bug running that ({msg}). Undo if anything looks wrong.")}))
+    guarded(|| live.exec_as_from(&caller, &cmd, plugin.as_deref()), |msg| serde_json::json!({"ok": false, "error": format!("SketchCraft hit a bug running that ({msg}). Undo if anything looks wrong.")}))
 }
 
 #[tauri::command]
@@ -135,7 +135,12 @@ fn main() {
         // signed self-updates from GitHub Releases (see app/src/updater.tsx)
         // (and only newer than this copy, from the matching release: see release_files_ok)
         .plugin(tauri_plugin_updater::Builder::new().default_version_comparator(|current, release| release.version > current && release_files_ok(&release)).build())
-        .manage(App(Mutex::new(Live::open(default_doc()))))
+        .manage(App(Mutex::new({
+            let mut live = Live::open(default_doc());
+            // this is the person's window: it says what an agent changed while it was closed
+            live.as_person_view();
+            live
+        })))
         .setup(|app| {
             // closes a plugin run nobody ended (the 150 s limit) and saves it, even when the page is silent
             let handle = app.handle().clone();
@@ -148,6 +153,12 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![exec, scene, sync, open_releases, portable, open_guide])
-        .run(tauri::generate_context!())
-        .expect("error while running SketchCraft");
+        .build(tauri::generate_context!())
+        .expect("error while building SketchCraft")
+        .run(|_, event| {
+            // a helper program (ffmpeg, Python, a DWG converter) still running goes with the app
+            if let tauri::RunEvent::Exit = event {
+                sketchcraft::helper::kill_all();
+            }
+        });
 }

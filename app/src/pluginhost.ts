@@ -103,7 +103,7 @@ export const MAX_COMMANDS = 10_000;
  * and closes when the run (or one tool click) is over, so a single Undo takes back
  * everything the plugin did, however many commands that was.
  */
-export function batcher() {
+export function batcher(onEnd?: (r: Reply) => void) {
   let open = false;
   let id: number | undefined;
   // begin and end are sent in order, each after the last has answered (a plugin that finishes right
@@ -124,8 +124,9 @@ export function batcher() {
       if (open) {
         open = false;
         await then(async () => {
-          await exec(id === undefined ? { cmd: "end_batch" } : { cmd: "end_batch", id });
+          const r = await exec(id === undefined ? { cmd: "end_batch" } : { cmd: "end_batch", id });
           id = undefined;
+          onEnd?.(r);
         });
       } else await chain;
     },
@@ -152,8 +153,14 @@ function commandGate(noun: "run" | "tool") {
 interface PluginEnv {
   run: (cmd: Record<string, unknown>) => Promise<Reply>;
   show: (r: PluginResult, plugin: Plugin) => void;
-  toast: (text: string, bad?: boolean) => void;
+  toast: (text: string, bad?: boolean, undo?: boolean) => void;
   ask: (form: PluginForm, plugin: Plugin) => Promise<Record<string, unknown> | null>;
+}
+
+/** A plugin run that changed the model says so, with a way back (the engine counted what changed). */
+export function announceChange(r: Reply, env: { toast: (text: string, bad?: boolean, undo?: boolean) => void }) {
+  const n = typeof r.changed === "number" ? r.changed : 0;
+  if (n > 0) env.toast(`changed ${n} thing${n === 1 ? "" : "s"}`, false, true);
 }
 
 /** Answer a worker's command: refused with a reason, or run inside the run's one undo step. */
@@ -198,7 +205,7 @@ export function runPlugin(
     units: string;
     run: (cmd: Record<string, unknown>) => Promise<Reply>;
     show: (r: PluginResult, plugin: Plugin) => void;
-    toast: (text: string, bad?: boolean) => void;
+    toast: (text: string, bad?: boolean, undo?: boolean) => void;
     /** show a form; the answers, or null if cancelled */
     ask: (form: PluginForm, plugin: Plugin) => Promise<Record<string, unknown> | null>;
     /** the command finished without an error */
@@ -218,7 +225,7 @@ export function runPlugin(
       return resolve();
     }
     const { worker } = sandbox;
-    const batch = batcher();
+    const batch = batcher((r) => announceChange(r, env));
     const gate = commandGate("run");
     const finish = () => {
       clearTimeout(timer);
@@ -292,7 +299,7 @@ export async function startPluginTool(
     units: string;
     run: (cmd: Record<string, unknown>) => Promise<Reply>;
     show: (r: PluginResult, plugin: Plugin) => void;
-    toast: (text: string, bad?: boolean) => void;
+    toast: (text: string, bad?: boolean, undo?: boolean) => void;
     ask: (form: PluginForm, plugin: Plugin) => Promise<Record<string, unknown> | null>;
     preview: (lines: [number, number, number][][]) => void;
     hint: (text: string) => void;
@@ -320,7 +327,7 @@ export async function startPluginTool(
   let timer: ReturnType<typeof setTimeout> | undefined;
   let over = false;
   // one undo step per tool event (a click): the batch opens at its first command and closes when it is handled
-  const batch = batcher();
+  const batch = batcher((r) => announceChange(r, env));
   const gate = commandGate("tool");
   const end = () => {
     if (over) return;

@@ -1070,13 +1070,17 @@ fn test_programs_are_scoped_away_from_the_real_folder() {
     }
 }
 
-/// R4-BRN-005 / R4-MBK-008: the guard does not depend on the cargo target folder being called `target`.
+/// R4-BRN-005 / R4-MBK-008 / CASHOUT-002: the guard does not need a folder called `target`, and it
+/// works whichever way cargo lays test programs out (`deps/` or `build/<pkg>/<hash>/out/`).
 #[test]
 fn the_test_guard_does_not_need_a_folder_called_target() {
-    let exe = std::env::current_exe().unwrap();
-    // this program sits in `<anything>/<profile>/deps/`; the guard looks only at that
-    assert_eq!(exe.parent().unwrap().file_name().unwrap(), "deps");
     assert!(sketchcraft::live::running_as_cargo_test());
+    let ok = |p: &str| sketchcraft::live::exe_in_test_layout(std::path::Path::new(p));
+    assert!(ok("/x/anything/debug/deps/hardening-1a2b"));
+    assert!(ok("/x/anything/debug/build/sketchcraft-core/c59a64f19ee66941/out/sketchcraft-c59a64"));
+    assert!(!ok("/x/anything/release/sketchcraft"));
+    assert!(!ok("/Applications/SketchCraft.app/Contents/MacOS/sketchcraft"));
+    assert!(!ok("/x/build/out/sketchcraft"));
 }
 
 /// R4-BRN-001: the wall-layer "borrowed lines" pass is bounded: the same drawing with the long

@@ -51,6 +51,40 @@ fn entry(id: &str, manifest: &str, code: String, builtin: bool, folder: Option<&
     Some(m)
 }
 
+/// Whether a plugin.json says the plugin is a SketchUp Ruby extension. The one test: `list()` uses it
+/// to decide how a plugin runs, and `install()` and its preview use it to say what the person is
+/// installing, so what is shown is what runs (SPECTER-002).
+pub fn manifest_is_ruby(manifest: &Value) -> bool {
+    manifest["ruby"] == true
+}
+
+/// The menu items and commands a Ruby extension adds, read from its source (`add_item("...")`,
+/// `UI::Command.new("...")`). A preview can't run Ruby, so this is a reading of the code, not a promise.
+pub fn ruby_menu_labels(files: &[(String, Vec<u8>)]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for (n, b) in files {
+        if !n.to_ascii_lowercase().ends_with(".rb") {
+            continue;
+        }
+        let text = String::from_utf8_lossy(b);
+        for marker in ["add_item", "UI::Command.new"] {
+            let mut rest: &str = &text;
+            while let Some(i) = rest.find(marker) {
+                rest = &rest[i + marker.len()..];
+                let t = rest.trim_start_matches(|c: char| c == '(' || c == ' ' || c == '\t');
+                let Some(q) = t.chars().next().filter(|c| *c == '"' || *c == '\'') else { continue };
+                if let Some(end) = t[1..].find(q) {
+                    let label: String = t[1..1 + end].chars().filter(|c| !c.is_control()).take(80).collect();
+                    if !label.trim().is_empty() && !out.contains(&label) && out.len() < 50 {
+                        out.push(label);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Every .rb file in a Ruby plugin's folder, by path inside it (2 MB in all).
 fn ruby_files(folder: &Path) -> Result<BTreeMap<String, String>> {
     let mut out = BTreeMap::new();
@@ -239,19 +273,28 @@ pub fn install(bytes: &[u8], file_name: Option<&str>, opts: &InstallOpts) -> Res
         return install_ruby(files, opts);
     }
     let manifest = files.iter().find(|(n, _)| n == "plugin.json").map(|(_, b)| b.clone()).ok_or_else(|| anyhow::anyhow!("no plugin.json"))?;
-    if !files.iter().any(|(n, _)| n == "main.js") {
+    let m: Value = serde_json::from_slice(&manifest).context("plugin.json isn't valid JSON")?;
+    if !manifest_is_ruby(&m) && !files.iter().any(|(n, _)| n == "main.js") {
         bail!("no main.js next to plugin.json");
     }
-    let m: Value = serde_json::from_slice(&manifest).context("plugin.json isn't valid JSON")?;
     let name = m.get("name").and_then(|n| n.as_str()).filter(|n| !n.trim().is_empty()).ok_or_else(|| anyhow::anyhow!("plugin.json needs a name"))?;
-    if !m.get("commands").is_some_and(|c| c.is_array()) {
+    if !manifest_is_ruby(&m) && !m.get("commands").is_some_and(|c| c.is_array()) {
         bail!("plugin.json needs a commands list");
     }
     let id = slug(name);
     if id.is_empty() || BUILTIN.iter().any(|(b, ..)| *b == id) {
         bail!("pick another name for this plugin");
     }
-    let about = describe(&id, name, Some(&m), false, &files);
+    // plugin.json that says "ruby": true is installed, shown and run as a Ruby extension (the same test
+    // `list()` uses). One that also ships main.js is two things at once: refused, not guessed at.
+    let is_ruby = manifest_is_ruby(&m);
+    if is_ruby && files.iter().any(|(n, _)| n == "main.js") {
+        bail!("plugin.json says this is a SketchUp Ruby extension (\"ruby\": true) but the zip also has a main.js; a plugin is one or the other");
+    }
+    if is_ruby && !files.iter().any(|(n, _)| !n.contains('/') && n.to_ascii_lowercase().ends_with(".rb")) {
+        bail!("plugin.json says this is a SketchUp Ruby extension (\"ruby\": true) but there is no .rb file at the top of it");
+    }
+    let about = describe(&id, name, Some(&m), is_ruby, &files);
     if let Some(done) = gate(&about, opts)? {
         return Ok(done);
     }
@@ -260,13 +303,18 @@ pub fn install(bytes: &[u8], file_name: Option<&str>, opts: &InstallOpts) -> Res
     if !replaced && disabled().contains(&id) {
         enable(&id, true)?;
     }
-    Ok(json!({"id": id, "name": name, "files": files.len(), "replaced": replaced, "sha256": about["sha256"]}))
+    Ok(json!({"id": id, "name": name, "files": files.len(), "replaced": replaced, "ruby": is_ruby, "sha256": about["sha256"]}))
 }
 
 /// What a plugin is, for the person deciding whether to install it.
 fn describe(id: &str, name: &str, manifest: Option<&Value>, ruby: bool, files: &[(String, Vec<u8>)]) -> Value {
     let field = |k: &str| manifest.and_then(|m| m.get(k)).and_then(Value::as_str).map(str::to_string);
-    let commands: Vec<String> = manifest.and_then(|m| m["commands"].as_array()).map(|a| a.iter().filter_map(|c| c["label"].as_str().map(str::to_string)).collect()).unwrap_or_default();
+    // a Ruby extension's commands are the menu items its code adds (the manifest's list isn't used for it)
+    let commands: Vec<String> = if ruby {
+        ruby_menu_labels(files)
+    } else {
+        manifest.and_then(|m| m["commands"].as_array()).map(|a| a.iter().filter_map(|c| c["label"].as_str().map(str::to_string)).collect()).unwrap_or_default()
+    };
     json!({
         "id": id,
         "name": name,
@@ -276,6 +324,7 @@ fn describe(id: &str, name: &str, manifest: Option<&Value>, ruby: bool, files: &
         "kind": if ruby { "SketchUp Ruby extension" } else { "JavaScript plugin" },
         "ruby": ruby,
         "commands": commands,
+        "commands_note": if ruby { "Read from the Ruby code. The menu is built when the extension runs, and it runs every time SketchCraft starts." } else { "" },
         "files": files.iter().map(|(n, b)| json!({"name": n, "bytes": b.len()})).collect::<Vec<_>>(),
         "sha256": files_hash(files),
         "installed": installed(id),
@@ -452,7 +501,7 @@ pub fn list() -> Value {
             let manifest = std::fs::read_to_string(p.join("plugin.json"));
             let code = std::fs::read_to_string(p.join("main.js"));
             // a SketchUp Ruby extension has .rb files instead of main.js
-            let is_ruby = manifest.as_ref().ok().and_then(|m| serde_json::from_str::<Value>(m).ok()).is_some_and(|v| v["ruby"] == true);
+            let is_ruby = manifest.as_ref().ok().and_then(|m| serde_json::from_str::<Value>(m).ok()).is_some_and(|v| manifest_is_ruby(&v));
             if is_ruby {
                 match (manifest, ruby_files(&p)) {
                     (Ok(m), Ok(f)) => match entry(&id, &m, String::new(), false, Some(&p)) {

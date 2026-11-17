@@ -61,16 +61,51 @@ pub fn build(asset: &Asset) -> Result<Model> {
     Ok(e.model)
 }
 
-/// The component for an asset in `m`, building it on first use.
+/// A built-in asset's definition carries this reserved `source`. A person, plugin, agent, file or library
+/// item can name a component "Door" (or anything else) but doesn't get the built-in's key, and the
+/// geometry is checked against a fingerprint of what the asset's own script builds, so a lookalike
+/// planted with a forged `source` is never reused either (SPECTER-001).
+pub fn source_of(asset: &Asset) -> String {
+    format!("builtin:{}", asset.key)
+}
+
+fn fingerprint(model: &Model) -> String {
+    crate::safety::sha256_hex(&serde_json::to_vec(model).unwrap_or_default())
+}
+
+fn expected_fingerprint(asset: &'static Asset, model: Option<&Model>) -> Result<String> {
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<std::collections::HashMap<&'static str, String>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(f) = cache.lock().unwrap().get(asset.key) {
+        return Ok(f.clone());
+    }
+    let f = match model {
+        Some(m) => fingerprint(m),
+        None => fingerprint(&build(asset)?),
+    };
+    cache.lock().unwrap().insert(asset.key, f.clone());
+    Ok(f)
+}
+
+/// The component for an asset in `m`, building it on first use. Found by the reserved key, never by
+/// the component's name.
 pub fn definition(m: &mut Model, key: &str) -> Result<Id> {
     let Some(asset) = find(key) else { bail!("no asset {key}; try: {}", ASSETS.iter().map(|a| a.key).collect::<Vec<_>>().join(", ")) };
-    if let Some(id) = m.find_definition(asset.name) {
-        return Ok(id);
-    }
-    let model = build(asset)?;
-    let id = m.new_id();
+    let src = source_of(asset);
     // doors and windows cut their opening in the wall they're placed on
     let cuts = matches!(asset.key, "door" | "window" | "garage_door");
-    m.definitions.insert(id, Definition { name: asset.name.to_string(), model: std::sync::Arc::new(model), attrs: Default::default(), source: None, cuts, face_me: asset.face_me });
+    let candidates: Vec<Id> = m.definitions.iter().filter(|(_, d)| d.source.as_deref() == Some(src.as_str()) && d.cuts == cuts && d.face_me == asset.face_me).map(|(&k, _)| k).collect();
+    let model = if candidates.is_empty() { Some(build(asset)?) } else { None };
+    let want = expected_fingerprint(asset, model.as_ref())?;
+    if let Some(id) = candidates.into_iter().find(|id| fingerprint(&m.definitions[id].model) == want) {
+        return Ok(id);
+    }
+    let model = match model {
+        Some(x) => x,
+        None => build(asset)?,
+    };
+    let id = m.new_id();
+    m.definitions.insert(id, Definition { name: asset.name.to_string(), model: std::sync::Arc::new(model), attrs: Default::default(), source: Some(src), cuts, face_me: asset.face_me });
     Ok(id)
 }

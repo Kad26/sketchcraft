@@ -10,7 +10,7 @@ import { pickSave } from "./files";
 import { cleanForm, cleanResult, type PluginField, type PluginForm, type PluginResult } from "./pluginclean";
 
 export { cleanForm, cleanResult };
-export { allowed, batcher, MAX_COMMANDS, RUBY_REPLAY_MS, runPlugin, startPluginTool } from "./pluginhost";
+export { allowed, announceChange, batcher, MAX_COMMANDS, RUBY_REPLAY_MS, runPlugin, startPluginTool } from "./pluginhost";
 export type { ToolPoint, ToolSession } from "./pluginhost";
 export type { PluginField, PluginForm, PluginResult };
 import { formatLength, parseLength } from "./units";
@@ -197,7 +197,8 @@ export function PluginsDialog({
     const lines = [
       `${look.kind}${look.version ? ` · version ${look.version}` : ""}${look.author ? ` · by ${look.author}` : ""}`,
       look.description ? String(look.description) : "",
-      cmds.length ? `Commands: ${cmds.slice(0, 12).join(", ")}` : "",
+      cmds.length ? `${look.ruby ? "Menu items (read from its Ruby code)" : "Commands"}: ${cmds.slice(0, 12).join(", ")}` : look.ruby ? "Menu items: none found in its Ruby code (it may add them when it runs)" : "",
+      look.ruby ? "This is a SketchUp Ruby extension: its Ruby code runs every time SketchCraft starts, and the menu it builds comes from that code." : "",
       `${files.length} file${files.length === 1 ? "" : "s"}: ${files.slice(0, 8).map((x) => `${x.name} (${x.bytes} B)`).join(", ")}${files.length > 8 ? ", …" : ""}`,
       `Fingerprint (SHA-256): ${String(look.sha256).slice(0, 16)}…`,
       replacing ? `This REPLACES the installed copy (version ${was?.version ?? "unknown"}${was?.sha256 === look.sha256 ? ", identical files" : ", different files"}). The old one is kept in .removed.` : "",
@@ -211,6 +212,12 @@ export function PluginsDialog({
     const r = await exec({ cmd: "install_plugin", data, name: f.name, replace: replacing });
     setBusy(false);
     if (!r.ok) return onToast(`Couldn't install ${f.name}: ${r.error}`, true);
+    // what was shown must be what was installed: same kind and same files
+    if (!!r.ruby !== !!look.ruby || r.sha256 !== look.sha256) {
+      await exec({ cmd: "remove_plugin", id: r.id });
+      await reload();
+      return onToast(`${f.name} installed as something other than what was shown, so it was removed again.`, true);
+    }
     await reload();
     onToast(`${r.replaced ? "Updated" : "Installed"} ${r.name}. Its commands are in File › Plugins and Shift+S.`);
   };

@@ -7,7 +7,10 @@
 //!    programs, no network, no plugin management.
 //!  - `Mcp`: an AI agent. Modeling plus file import/export, but only inside a
 //!    workspace folder, and never plugin management, raw file writes, or
-//!    anything that launches things.
+//!    anything that starts another program: `animate` (ffmpeg), `import_ifc`
+//!    (Python), `import_dwg` and `export_dwg` (DWG converters) are the person's
+//!    alone (a person's helper runs are time-limited and killed with the app:
+//!    see `helper.rs`).
 //!
 //! The lists below are allowlists: a command nobody classified is refused for
 //! plugins and agents. Every caller also gets the same sanity checks on the
@@ -162,7 +165,7 @@ const MODEL: &[&str] = &[
 /// other network-reaching commands are the person's alone. An agent that wants a real site asks the person to add the
 /// location (Model > Add location), or imports terrain it already has as a file (`import_obj`, `terrain_from_contours`).
 const FILES: &[&str] = &[
-    "save", "open", "new", "export_obj", "export_glb", "export_stl", "export_dae", "export_dxf", "export_pdf", "export_ifc", "export_dwg", "import_obj", "import_skp", "import_cloud", "import_ifc", "import_dxf", "import_dwg", "import_fbx", "animate", "sheets", "blueprint", "photoreal", "thumbnail", "insert_file", "save_to_library", "library_add", "library", "save_image",
+    "save", "open", "new", "export_obj", "export_glb", "export_stl", "export_dae", "export_dxf", "export_pdf", "export_ifc", "import_obj", "import_skp", "import_cloud", "import_dxf", "import_fbx", "sheets", "blueprint", "photoreal", "thumbnail", "insert_file", "save_to_library", "library_add", "library", "save_image",
 ];
 
 /// Commands only an agent may add to `MODEL`. `undo`/`redo` are not a plugin's: a plugin run is already one undo step
@@ -246,7 +249,27 @@ fn resolve(p: &Path) -> PathBuf {
 /// there). Refuses anything outside, hidden files and folders, and the
 /// Plugins folder (a file written there is code the app would run).
 fn confine(raw: &str, ws: &Workspace) -> Result<String, String> {
-    let Some(root) = &ws.root else { return Ok(raw.to_string()) };
+    let Some(root) = &ws.root else {
+        // `--any-path` lifts only the confinement to a folder. The rules about *which* folders and files stay:
+        // no hidden names, no Backups or Plugins folder (by spelling, and by identity), anywhere along the path
+        // (SPECTER-003). Side-file names and "only files this agent made" are checked by `vet`, for every agent.
+        let p = Path::new(raw);
+        let joined = if p.is_absolute() { p.to_path_buf() } else { std::env::current_dir().map_err(|e| e.to_string())?.join(p) };
+        let full = resolve(&joined);
+        let base = crate::live::default_doc().parent().map(Path::to_path_buf).unwrap_or_default();
+        let mut walked = PathBuf::new();
+        for c in full.components() {
+            walked.push(c.as_os_str());
+            if matches!(c, Component::Prefix(_) | Component::RootDir) {
+                continue;
+            }
+            let name = c.as_os_str().to_string_lossy();
+            if name.starts_with('.') || crate::library::reserved(&name) || crate::library::is_protected(&walked, &base) {
+                return Err(format!("{raw:?}: agents can't use hidden files, Backups or the Plugins folder (--any-path lifts the folder limit, not this)"));
+            }
+        }
+        return Ok(full.to_string_lossy().into_owned());
+    };
     let p = Path::new(raw);
     let joined = if p.is_absolute() { p.to_path_buf() } else { root.join(p) };
     let full = resolve(&joined);

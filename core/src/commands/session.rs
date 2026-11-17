@@ -17,9 +17,14 @@ impl Engine {
             Command::EndBatch { id } => {
                 // an end that names a batch that is already over (closed by the timer, or replaced) leaves the current one alone
                 if id.is_none_or(|i| i == self.batch_seq) {
+                    self.last_batch = None;
                     self.end_batch();
                 }
-                json!({})
+                // a plugin's run that changed the model: who, and how many things (the app says so, with Undo)
+                match self.last_batch.take() {
+                    Some((who, n)) if n > 0 => json!({"origin": who, "changed": n}),
+                    _ => json!({}),
+                }
             }
             Command::Undo => {
                 if self.batch.is_some() {

@@ -14,7 +14,7 @@ guess today.
 | --- | --- | --- |
 | **0.3.6** | Opens your files | SketchUp files from any version (6 to 27), a security review, faster and steadier everywhere |
 | **0.3.7** | Drafting | LayOut-class drawings: line weights, hatches and cut fills per tag, dimensions that stay attached, big documents that stay fast |
-| **0.3.8** | Texturing | Put textures exactly where you want them, unwrap UVs, paint vertices, export to game engines |
+| **0.3.8** | Texturing | A blocky beaver to paint, then put textures exactly where you want them, unwrap UVs, paint vertices, export to game engines |
 | **0.3.9** | Makers | Fix a model in one click, check it for 3D printing, cut lists with diagrams and CNC files |
 | **0.4.0** | No extension tax | The add-ons people pay for most, built in: round corners, loft, thicken, bend, parametric railings and stairs |
 | **0.4.1** | Big models | Every CPU core, lighter imports, smooth orbiting on huge sites |
@@ -39,13 +39,14 @@ complaint about LayOut is that it's slow and loses your dimensions. So:
 
 ## 0.3.8: Texturing
 
-1. **glTF / GLB export** with UVs and vertex colours, plus **FBX** and a **lightmap UV channel**
-2. **UV unwrap** with a UV view
-3. **Position Texture**: move, rotate, scale and skew a texture on a face
-4. **Paint-through** across connected faces
-5. **Projection mapping**: planar, box, cylinder, sphere
-6. **Textures in SketchUp 2017–2020 imports**
-7. **Vertex painting**
+1. **Blocky Beaver** and a **texturing test set** (dice, can, globe, crate, soccer ball): every feature below is built and tested on them
+2. **glTF / GLB export** with UVs and vertex colours, plus **FBX** and a **lightmap UV channel**
+3. **UV unwrap** with a UV view
+4. **Position Texture**: move, rotate, scale and skew a texture on a face
+5. **Paint-through** across connected faces
+6. **Projection mapping**: planar, box, cylinder, sphere
+7. **Textures in SketchUp 2017–2020 imports**
+8. **Vertex painting**
 
 ## 0.3.9: Makers
 

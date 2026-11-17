@@ -59,7 +59,7 @@ person at the keyboard:
 ## Claude Code
 
 This repository's `.mcp.json` points Claude Code at a local build under
-`${HOME}/Documents/Companies/sketchcraft/target/release/` (it runs that binary
+`./target/release/` in the repository (start Claude Code from the repository's top folder; it runs that binary
 when you trust the project, so only trust a clone whose binary you built). In another
 project, add:
 

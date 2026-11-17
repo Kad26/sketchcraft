@@ -23,6 +23,7 @@ pub mod export;
 pub mod export2;
 pub mod fbx;
 pub mod geo;
+pub mod helper;
 pub mod geom;
 pub mod history;
 pub mod http;

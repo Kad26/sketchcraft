@@ -37,7 +37,10 @@ concurrency:
 #     `publish` job signs the update packages with the real key and makes the
 #     draft release; it compiles nothing, so no dependency build script or
 #     proc-macro ever runs next to the key. Only the pinned Tauri CLI
-#     (`signer sign`, installed with --ignore-scripts) and a short script run there.
+#     (`signer sign`, installed alone from tools/release/package-lock.json with --ignore-scripts)
+#     and short scripts run there; each platform's files are downloaded into their own folder and
+#     checked against that platform's exact names and file types (tools/release/check-bundles.mjs)
+#     before anything is signed.
 # The `publish` job names a GitHub Environment, `release`: put the signing
 # secrets in it with required reviewers, and add a tag protection rule
 # (ruleset) for v* tags so only the maintainer can start a release
@@ -69,6 +72,11 @@ jobs:
             echo "::error::${GITHUB_REF_NAME} isn't on main. Releases are cut from main."
             exit 1
           fi
+      # Update-key rotation (docs/SIGNING.md, "Key rotation (0.3.6 bridge)"): v0.3.6 takes the bridge path
+      # (signed with the OLD key), anything greater the post-bridge path (NEW key, plus the frozen bridge
+      # file). A path that can't be taken fails here, before anything is built.
+      - name: Which update-key path, and can it be taken
+        run: node tools/release/preflight.mjs .
 
   # The web UI, built once without any secrets. The installers embed it.
   frontend:
@@ -140,9 +148,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: dtolnay/rust-toolchain@263313d2989f864a2b8613f97277288638e7d8f8 # rust 1.99.1 (its version branch)
         with:
-          toolchain: stable
           targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -205,9 +212,23 @@ jobs:
       # -setup.exe, .AppImage), without the throwaway signatures.
       - name: Collect the installers
         shell: bash
+        env:
+          PLATFORM: ${{ matrix.platform }}
         run: |
+          set -euo pipefail
           mkdir -p bundles
-          find target -path '*/release/bundle/*' -type f \( -name '*.dmg' -o -name '*.app.tar.gz' -o -name '*-setup.exe' -o -name '*.msi' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' \) -exec cp {} bundles/ \;
+          v=$(node -p "require('./app/src-tauri/tauri.conf.json').version")
+          p=$(node -p "require('./app/src-tauri/tauri.conf.json').productName")
+          # only the file names this platform's bundler makes (name + version); `publish` checks them again
+          case "$PLATFORM" in
+            macos-latest)   names=("${p}.app.tar.gz" "${p}_universal.app.tar.gz" "${p}_${v}_universal.dmg") ;;
+            windows-latest) names=("${p}_${v}_x64-setup.exe" "${p}_${v}_x64_en-US.msi") ;;
+            ubuntu-22.04)   names=("${p}_${v}_amd64.AppImage" "${p}_${v}_amd64.deb" "${p}-${v}-1.x86_64.rpm") ;;
+            *) echo "::error::unknown platform"; exit 1 ;;
+          esac
+          for n in "${names[@]}"; do
+            find target -path '*/release/bundle/*' -type f -name "$n" -exec cp {} bundles/ \;
+          done
           ls -la bundles
           [ -n "$(ls bundles)" ] || { echo "::error::no installers were built"; exit 1; }
       # With Apple signing on, the macOS build waits for `sign-macos` (its signed copy is `bundles-macos-latest`).
@@ -329,51 +350,67 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
-      - name: Install the Tauri CLI (no install scripts)
-        working-directory: app
+      # Only the Tauri CLI, at an exact version, from its own tiny lockfile (sha512 for every file):
+      # the key's step doesn't trust the app's whole npm tree. No install scripts run.
+      - name: Install only the Tauri CLI (no install scripts)
+        working-directory: tools/release
         run: npm ci --ignore-scripts
+      # One folder per platform, so a build can only ever supply its own platform's files (no merging).
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: bundles-*
-          path: bundles
-          merge-multiple: true
-      - name: Sign the update packages
+          name: bundles-macos-latest
+          path: bundles/macos
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: bundles-windows-latest
+          path: bundles/windows
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: bundles-ubuntu-22.04
+          path: bundles/linux
+      # Nothing is signed until every platform folder holds exactly its own expected names, and each
+      # file is the right kind of file (Mach-O in the macOS app, PE .exe, ELF AppImage, ...).
+      - name: Check each platform's files
         shell: bash
-        working-directory: app
+        run: |
+          set -euo pipefail
+          v=$(node -p "require('./app/src-tauri/tauri.conf.json').version")
+          p=$(node -p "require('./app/src-tauri/tauri.conf.json').productName")
+          node tools/release/check-bundles.mjs bundles "$p" "$v"
+      # Fails the release unless the signing secret is the key this version must be signed with:
+      # the OLD key for v0.3.6, the NEW key (the public half in tauri.conf.json) for anything later.
+      # It signs a throwaway file and checks it against that public key; nothing else sees the secret.
+      - name: Check the signing key matches this release's public key
+        shell: bash
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          shopt -s nullglob
-          n=0
-          for f in ../bundles/*.app.tar.gz ../bundles/*-setup.exe ../bundles/*.AppImage; do
-            npx --no-install tauri signer sign "$f"
-            n=$((n+1))
+          node tools/release/key-check.mjs . "$PWD/tools/release/node_modules/@tauri-apps/cli/tauri.js"
+      - name: Sign the update packages
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          cli="$PWD/tools/release/node_modules/@tauri-apps/cli/tauri.js"
+          [ -f "$cli" ] || { echo "::error::the Tauri CLI isn't installed"; exit 1; }
+          v=$(node -p "require('./app/src-tauri/tauri.conf.json').version")
+          for f in $(node -p "Object.values(require('./bundles/manifest.json').update).join(' ')"); do
+            node "$cli" signer sign --app-version "$v" "bundles/$f"
           done
-          [ "$n" -ge 3 ] || { echo "::error::expected a macOS, Windows and Linux update package, found $n"; exit 1; }
-      - name: latest.json
+      # latest-v2.json: this release (what apps with the NEW public key read). latest.json: what apps
+      # that still trust the OLD key read. For v0.3.6 both are this release; for later ones latest.json is the
+      # frozen v0.3.6 manifest (tools/release/bridge-latest.json), so an old install goes to 0.3.6 first.
+      # Every signature is verified against the expected public key, and a bad or missing bridge file fails.
+      - name: latest-v2.json and latest.json
         shell: bash
         run: |
           set -euo pipefail
-          node - <<'JS'
-          const fs = require("fs");
-          const v = JSON.parse(fs.readFileSync("app/src-tauri/tauri.conf.json", "utf8")).version;
-          const tag = process.env.GITHUB_REF_NAME;
-          if (tag !== `v${v}`) throw new Error(`tag ${tag} is not v${v}`);
-          const base = `https://github.com/${process.env.GITHUB_REPOSITORY}/releases/download/${tag}/`;
-          const files = fs.readdirSync("bundles");
-          const entry = (name) => ({ signature: fs.readFileSync(`bundles/${name}.sig`, "utf8").trim(), url: base + encodeURIComponent(name) });
-          const find = (re) => { const f = files.filter((n) => re.test(n)); if (f.length !== 1) throw new Error(`expected one ${re}, found ${f}`); return f[0]; };
-          const mac = entry(find(/\.app\.tar\.gz$/));
-          const platforms = {
-            "darwin-aarch64": mac,
-            "darwin-x86_64": mac,
-            "windows-x86_64": entry(find(/-setup\.exe$/)),
-            "linux-x86_64": entry(find(/\.AppImage$/)),
-          };
-          fs.writeFileSync("bundles/latest.json", JSON.stringify({ version: v, notes: `SketchCraft ${v}`, pub_date: new Date().toISOString(), platforms }, null, 2));
-          JS
+          node tools/release/make-manifests.mjs . bundles
+          cat bundles/latest-v2.json
           cat bundles/latest.json
       - name: Create the draft release
         shell: bash
@@ -381,7 +418,42 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft --title "SketchCraft $GITHUB_REF_NAME" --notes "Draft: check the files, then publish." bundles/*
+          files=(bundles/latest.json bundles/latest-v2.json)
+          for f in $(node -p "const m=require('./bundles/manifest.json'); m.upload.concat(Object.values(m.update).map((u) => u + '.sig')).join(' ')"); do files+=("bundles/$f"); done
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft --title "SketchCraft $GITHUB_REF_NAME" --notes "Draft: check the files, then publish." "${files[@]}"
+
+  # Build provenance (SLSA, signed through Sigstore) for the files people download: it proves they came
+  # from this workflow, at this tag and commit. Check one with `gh attestation verify <file> --repo
+  # <owner>/<repo>` (docs/SIGNING.md). Only this job gets `id-token` and `attestations` write; it names no
+  # secret, compiles nothing, and attests the artifacts exactly as the build jobs made them.
+  attest:
+    needs: [publish, cli]
+    if: ${{ !cancelled() && needs.publish.result == 'success' && needs.cli.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: bundles-*
+          path: attest/bundles
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: extras-*
+          path: attest/extras
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            attest/bundles/*/*.dmg
+            attest/bundles/*/*.app.tar.gz
+            attest/bundles/*/*.exe
+            attest/bundles/*/*.msi
+            attest/bundles/*/*.AppImage
+            attest/bundles/*/*.deb
+            attest/bundles/*/*.rpm
+            attest/extras/*/*.zip
 
   # The headless CLI. No secrets, no write access: it builds and hands the zip on.
   cli:
@@ -404,9 +476,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-        with:
-          toolchain: stable
+      - uses: dtolnay/rust-toolchain@263313d2989f864a2b8613f97277288638e7d8f8 # rust 1.99.1 (its version branch)
       - run: cargo build --locked --release -p sketchcraft-core
       - name: Package
         shell: bash
@@ -425,6 +495,9 @@ jobs:
   # for every file on it (so a download can be checked against the release page).
   assets:
     needs: [publish, cli]
+    # sign-macos is skipped while Apple signing is off; without this, the skip cascades and the
+    # zips and SHA256SUMS never reach the release (it happened on v0.3.6)
+    if: ${{ !cancelled() && needs.publish.result == 'success' && needs.cli.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write

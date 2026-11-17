@@ -1,0 +1,5 @@
+# One Rust version for local builds and CI. The CI workflows install exactly this version
+# (and a CI step checks the two agree); change both together.
+[toolchain]
+channel = "1.99.1"
+profile = "minimal"

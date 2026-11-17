@@ -29,9 +29,15 @@ export async function pickSave(defaultName: string, ext: string, label: string):
 
 const KEY = "sketchcraft.currentFile";
 
+/** A path that ⌘S may write to: a SketchCraft model file, never something else the storage was made to name. */
+export function isModelPath(p: string | null | undefined): p is string {
+  return !!p && p.length < 4096 && !p.includes("\0") && p.toLowerCase().endsWith(".sketchcraft");
+}
+
 export function rememberedFile(): string | null {
   try {
-    return localStorage.getItem(KEY);
+    const p = localStorage.getItem(KEY);
+    return isModelPath(p) ? p : null;
   } catch {
     return null;
   }

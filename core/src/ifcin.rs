@@ -42,7 +42,12 @@ pub fn python() -> Option<PathBuf> {
     cands.extend(std::env::split_paths(&path).flat_map(|d| names.iter().map(move |n| d.join(n)).collect::<Vec<_>>()));
     cands.extend(["/opt/homebrew/bin/python3", "/usr/local/bin/python3", "/usr/bin/python3"].map(PathBuf::from));
     cands.into_iter().filter(|p| p.is_file()).find(|p| {
-        Command::new(p).args(["-I", "-c", "import ifcopenshell.geom"]).output().map(|o| o.status.success()).unwrap_or(false)
+        {
+            let mut c = Command::new(p);
+            c.args(["-I", "-c", "import ifcopenshell.geom"]);
+            crate::helper::run(c, crate::helper::PROBE)
+        }
+        .map(|o| o.status.success()).unwrap_or(false)
     })
 }
 
@@ -96,9 +101,11 @@ pub fn import(m: &mut Model, path: &Path) -> Result<IfcResult> {
     let script = tmp.join("ifc_mesh.py");
     let out = tmp.join("out.json");
     std::fs::write(&script, SCRIPT)?;
-    let run = Command::new(&py).arg("-I").arg(&script).arg(crate::safety::path_arg(path)).arg(&out).output();
+    let mut c = Command::new(&py);
+    c.arg("-I").arg(&script).arg(crate::safety::path_arg(path)).arg(&out);
+    let run = crate::helper::run(c, crate::helper::IFC);
     let result = (|| {
-        let o = run.context("couldn't start Python")?;
+        let o = run.map_err(|e| anyhow::anyhow!("Python ({}): {}", py.display(), crate::helper::why(&e))).context("couldn't run IfcOpenShell")?;
         if !o.status.success() {
             let err = String::from_utf8_lossy(&o.stderr);
             bail!("IfcOpenShell couldn't read that file: {}", err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("no message"));

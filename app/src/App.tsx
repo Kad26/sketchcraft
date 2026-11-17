@@ -159,7 +159,7 @@ export default function App() {
   };
   const [measure, setMeasure] = useState({ label: "", value: "" });
   const [typed, setTyped] = useState("");
-  const [toast, setToast] = useState<{ text: string; bad?: boolean } | null>(null);
+  const [toast, setToast] = useState<{ text: string; bad?: boolean; undo?: boolean } | null>(null);
   const [tab, setTab] = useState<Tab>("outliner");
   const [styles, setStyles] = useState<Styles>(() => {
     let help = true;
@@ -265,9 +265,10 @@ export default function App() {
   const showKeysRef = useRef(false);
   showKeysRef.current = showKeys;
 
-  const say = useCallback((text: string, bad = false) => {
-    setToast({ text, bad });
-    window.setTimeout(() => setToast((t) => (t?.text === text ? null : t)), bad && text.length > 120 ? 9000 : 3600);
+  // `undo`: the toast carries an Undo button (a plugin run that changed the model)
+  const say = useCallback((text: string, bad = false, undo = false) => {
+    setToast({ text, bad, undo });
+    window.setTimeout(() => setToast((t) => (t?.text === text ? null : t)), undo ? 9000 : bad && text.length > 120 ? 9000 : 3600);
   }, []);
 
   const refresh = useCallback(async () => setScene(await loadScene()), []);
@@ -276,6 +277,7 @@ export default function App() {
     async (cmd: Record<string, unknown>): Promise<Reply> => {
       const r = await exec(cmd);
       if (!r.ok) say(r.error ?? "That didn't work", true);
+      else if ((cmd.cmd === "undo" || cmd.cmd === "redo") && typeof r.origin === "string" && r.origin !== "you") say(`${cmd.cmd === "undo" ? "Undid" : "Redid"} a change by ${r.origin}`);
       else if (r.save_error) say(`Couldn't save your model: ${r.save_error}`, true);
       else if (Array.isArray(r.skipped_pictures) && r.skipped_pictures.length) say(skippedText(r.skipped_pictures as string[]), true);
       await refresh();
@@ -287,7 +289,7 @@ export default function App() {
   // what plugin code asks for (JavaScript or Ruby): the engine only lets it model
   const runForPlugin = useCallback(
     async (cmd: Record<string, unknown>, plugin?: Plugin): Promise<Reply> => {
-      const r = await execPlugin(cmd);
+      const r = await execPlugin(cmd, plugin?.name);
       if (!r.ok) say(`${plugin ? `Plugin “${plugin.name}”: ` : ""}${r.error ?? "That didn't work"}`, true);
       await refresh();
       return r;
@@ -295,7 +297,7 @@ export default function App() {
     [refresh, say]
   );
   // what a plugin says is shown as the plugin's, never in the app's own voice
-  const sayAs = useCallback((plugin: Plugin, t: string, bad?: boolean) => say(plugin.builtin ? t : `Plugin “${plugin.name.slice(0, 40)}”: ${t}`, bad), [say]);
+  const sayAs = useCallback((plugin: Plugin, t: string, bad?: boolean, undo?: boolean) => say(plugin.builtin ? t : `Plugin “${plugin.name.slice(0, 40)}”: ${t}`, bad, undo), [say]);
   const { plugins, setPlugins, pluginShown, setPluginShown, pluginRuns, toolSession, pluginTool, pluginForm, reloadPlugins, livePlugins, pluginButtons, runPluginCommand } = usePlugins({ sel, scene, tool, setTool, say, sayAs, runForPlugin, refresh });
   const { file, importFile, runTemplate } = useFileActions({ run, say, refresh, api, scene, figure, currentFile, setCurrentFile, setSel });
 
@@ -611,10 +613,10 @@ export default function App() {
             <Icons.theme />
             Themes
           </button>
-          <button className="icon-btn" title="Undo (⌘Z)" onClick={() => run({ cmd: "undo" })}>
+          <button className="icon-btn" title={`Undo (⌘Z)${scene?.undo_origin && scene.undo_origin !== "you" ? `: the last step is from ${scene.undo_origin}` : ""}`} onClick={() => run({ cmd: "undo" })}>
             <Icons.undo />
           </button>
-          <button className="icon-btn" title="Redo (⇧⌘Z)" onClick={() => run({ cmd: "redo" })}>
+          <button className="icon-btn" title={`Redo (⇧⌘Z)${scene?.redo_origin && scene.redo_origin !== "you" ? `: the next step is from ${scene.redo_origin}` : ""}`} onClick={() => run({ cmd: "redo" })}>
             <Icons.redo />
           </button>
           <input ref={fileRef} type="file" accept=".obj,.skp,.fbx,.dxf" hidden onChange={(e) => e.target.files?.[0] && importFile(e.target.files[0])} />
@@ -845,7 +847,16 @@ export default function App() {
           </ErrorBoundary>
         )}
         {showWs && <WorkspaceDialog ws={ws} onChange={editWs} onReset={() => editWs(null)} onClose={() => setShowWs(false)} />}
-        {toast && <div className={`toast ${toast.bad ? "bad" : ""}`}>{toast.text}</div>}
+        {toast && (
+          <div className={`toast ${toast.bad ? "bad" : ""}`}>
+            {toast.text}
+            {toast.undo && (
+              <button className="toast-undo" onClick={() => (setToast(null), void run({ cmd: "undo" }))}>
+                Undo
+              </button>
+            )}
+          </div>
+        )}
         <AskHost />
         {showRender && api.current && (
           <RenderDialog

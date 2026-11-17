@@ -142,15 +142,30 @@ pub fn adopt(root: &mut Model, mut src: Model, name: &str, source: Option<String
     id
 }
 
-/// The component for a library file in `root`, loading it on first use.
+/// What identifies a library file's contents inside a model: its file name and a hash of its bytes.
+/// Never a folder path (a model gets shared; the path would carry the person's folder names).
+pub fn source_key(path: &str) -> Result<String> {
+    let p = Path::new(path);
+    let len = std::fs::metadata(p)?.len();
+    if len > MAX_LIBRARY_BYTES {
+        bail!("{} is {} MB; the library reads parts up to {} MB (open it as a model instead)", p.display(), len >> 20, MAX_LIBRARY_BYTES >> 20);
+    }
+    let hash = crate::safety::sha256_hex(&std::fs::read(p)?);
+    let file = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    Ok(format!("{file}#{}", &hash[..32]))
+}
+
+/// The component for a library file in `root`, loading it on first use. A file is reused by its
+/// contents (name and hash), so another file in another folder with the same name, or the same
+/// file after it changed, gets its own component.
 pub fn definition_for(root: &mut Model, path: &str) -> Result<Id> {
-    let canon = std::fs::canonicalize(path).map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|_| path.to_string());
-    if let Some((&id, _)) = root.definitions.iter().find(|(_, d)| d.source.as_deref() == Some(canon.as_str())) {
+    let key = source_key(path)?;
+    if let Some((&id, _)) = root.definitions.iter().find(|(_, d)| d.source.as_deref() == Some(key.as_str())) {
         return Ok(id);
     }
     let src = load_file(path)?;
     let name = nice_name(&Path::new(path).file_stem().unwrap_or_default().to_string_lossy());
-    Ok(adopt(root, src, &name, Some(canon)))
+    Ok(adopt(root, src, &name, Some(key)))
 }
 
 /// Components a component uses inside it (all the way down). Iterative: a chain of any length (or a loop) is safe.

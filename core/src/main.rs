@@ -85,7 +85,8 @@ fn main() {
         }
         Some("bridge") => {
             let port = flag(&args, "--port").and_then(|p| p.parse().ok()).unwrap_or(5175);
-            let live = sketchcraft::live::Live::open(sketchcraft::live::default_doc());
+            let mut live = sketchcraft::live::Live::open(sketchcraft::live::default_doc());
+            live.as_person_view();
             let opts = sketchcraft::http::Options {
                 port,
                 page: flag(&args, "--origin").unwrap_or_else(|| sketchcraft::http::DEFAULT_PAGE.into()),

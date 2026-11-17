@@ -1,0 +1,23 @@
+{
+  "version": "0.3.6",
+  "notes": "SketchCraft 0.3.6",
+  "pub_date": "2026-11-17T21:47:05.066Z",
+  "platforms": {
+    "darwin-aarch64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUK3VQNGQxeUVQbnBXQjdaUlRwZlpHQmFqOGhHV3daQW5DNXR4RUxOTm5BTkNFQW9hc0tCcTJtTTFCT3l3NDl6R1V1RXR5YWk3NTNydW5qYzV6MGVteWM4YVJZckh3WXd3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0OTUyMDI0CWZpbGU6U2tldGNoQ3JhZnQuYXBwLnRhci5negl2ZXJzaW9uOjAuMy42CmdTMlgyMDBFVy9kTjQ0OStpWUlwNFJSV1BHZHdSalFjRWV4ZXZkdndyaWpEQ1RrUzR0aS9QdndVYkN4c1A5UlVNRDNDUExUZzVnQnlHNGNzVUtBWUFBPT0K",
+      "url": "https://github.com/jasonsutter87/sketchcraft/releases/download/v0.3.6/SketchCraft.app.tar.gz"
+    },
+    "darwin-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUK3VQNGQxeUVQbnBXQjdaUlRwZlpHQmFqOGhHV3daQW5DNXR4RUxOTm5BTkNFQW9hc0tCcTJtTTFCT3l3NDl6R1V1RXR5YWk3NTNydW5qYzV6MGVteWM4YVJZckh3WXd3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0OTUyMDI0CWZpbGU6U2tldGNoQ3JhZnQuYXBwLnRhci5negl2ZXJzaW9uOjAuMy42CmdTMlgyMDBFVy9kTjQ0OStpWUlwNFJSV1BHZHdSalFjRWV4ZXZkdndyaWpEQ1RrUzR0aS9QdndVYkN4c1A5UlVNRDNDUExUZzVnQnlHNGNzVUtBWUFBPT0K",
+      "url": "https://github.com/jasonsutter87/sketchcraft/releases/download/v0.3.6/SketchCraft.app.tar.gz"
+    },
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUK3VQNGQxeUVQbnNFejV5NEQxUzVOakExb3BsUG9JVTVyNm44L0FWcXJlZXBPWlhmalJhZXpBdXNjKytvQ3l4bUQrNXJuVUEwMWJ0QTJjV09XVWdkVnRiNmNlcW4vdFFnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0OTUyMDI0CWZpbGU6U2tldGNoQ3JhZnRfMC4zLjZfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjAuMy42ClppYUppNXpLQUUwQzE3bFRqSXVWSVo1WkJmNW1tTVQrckxCOW5ZU3h5ZzNJZ2p5UGFSWGY3cDAycm9zZmRCRXRpbTk5TmVJdDFsaTllMjVaZFlBVkFnPT0K",
+      "url": "https://github.com/jasonsutter87/sketchcraft/releases/download/v0.3.6/SketchCraft_0.3.6_x64-setup.exe"
+    },
+    "linux-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUK3VQNGQxeUVQbmdhSWhWUk5HTUxLaXJEck4wMUtSL0tXYzIvdXJkMndsR3cwTDNaZEJjQTNnWWhvMzB4TzJad2NCRDZjbkhCeWdUWGorajZrbDg0eTdOR2hWN28vSWdvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0OTUyMDI0CWZpbGU6U2tldGNoQ3JhZnRfMC4zLjZfYW1kNjQuQXBwSW1hZ2UJdmVyc2lvbjowLjMuNgpOek45VVVIK2tZK003SFZJaTVGNThOY0hKOFZnT3RJSGZjeXRZbEZISUI1NHBMTTNPTGhTNGVIcjM0YktmalZDam84RnVVdEVJZlJNVTNUYjEwOCtEUT09Cg==",
+      "url": "https://github.com/jasonsutter87/sketchcraft/releases/download/v0.3.6/SketchCraft_0.3.6_amd64.AppImage"
+    }
+  }
+}
