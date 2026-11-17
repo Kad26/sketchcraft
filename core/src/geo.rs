@@ -22,10 +22,9 @@ pub fn fetch(url: &str) -> Result<Vec<u8>> {
     if let Ok(b) = std::fs::read(&file) {
         return Ok(b);
     }
-    let out = std::process::Command::new("curl")
-        .args(["-sSfL", "--max-time", "20", "-A", "SketchCraft/0.2 (3D modeling app)", url])
-        .output()
-        .context("downloading needs curl")?;
+    let mut c = std::process::Command::new("curl");
+    c.args(["-sSfL", "--max-time", "20", "-A", "SketchCraft/0.2 (3D modeling app)", url]);
+    let out = crate::helper::run(c, crate::helper::DOWNLOAD).map_err(|e| anyhow::anyhow!("downloading needs curl ({})", crate::helper::why(&e)))?;
     if !out.status.success() {
         bail!("couldn't download {url}: {}", String::from_utf8_lossy(&out.stderr).trim());
     }

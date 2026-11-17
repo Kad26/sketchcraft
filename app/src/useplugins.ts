@@ -5,9 +5,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { execPlugin, type Reply, type Scene } from "./engine";
 import { runRuby } from "./ruby";
-import { RUBY_REPLAY_MS, batcher, cleanForm, cleanResult, loadPlugins, MAX_COMMANDS, runPlugin, startPluginTool, type Plugin, type PluginCommand, type PluginForm, type PluginList, type PluginResult, type ToolSession } from "./plugins";
+import { RUBY_REPLAY_MS, announceChange, batcher, cleanForm, cleanResult, loadPlugins, MAX_COMMANDS, runPlugin, startPluginTool, type Plugin, type PluginCommand, type PluginForm, type PluginList, type PluginResult, type ToolSession } from "./plugins";
 import type { Sel } from "./selection";
 import type { Tool } from "./Viewport";
+
+/** a short hash, to tell one version of a plugin's files from another */
+function fingerprint(t: string): string {
+  let h = 2166136261;
+  for (let i = 0; i < t.length; i++) h = Math.imul(h ^ t.charCodeAt(i), 16777619);
+  return `${t.length}.${(h >>> 0).toString(36)}`;
+}
 
 export function usePlugins({ sel, scene, tool, setTool, say, sayAs, runForPlugin, refresh }: {
   sel: Sel;
@@ -15,7 +22,7 @@ export function usePlugins({ sel, scene, tool, setTool, say, sayAs, runForPlugin
   tool: Tool;
   setTool: (t: Tool | ((t: Tool) => Tool)) => void;
   say: (text: string, bad?: boolean) => void;
-  sayAs: (plugin: Plugin, t: string, bad?: boolean) => void;
+  sayAs: (plugin: Plugin, t: string, bad?: boolean, undo?: boolean) => void;
   runForPlugin: (cmd: Record<string, unknown>, plugin?: Plugin) => Promise<Reply>;
   refresh: () => Promise<void>;
 }) {
@@ -30,10 +37,18 @@ export function usePlugins({ sel, scene, tool, setTool, say, sayAs, runForPlugin
   const reloadPlugins = () => loadPlugins().then(setPlugins, () => {});
   // a SketchUp Ruby plugin's commands are the menu items it adds when it loads
   const [rubyMenus, setRubyMenus] = useState<Record<string, string[] | { error: string }>>({});
+  // the menu is remembered with a fingerprint of the plugin's files, so a replaced plugin gets its new menu
+  const rubySig = (p: Plugin) => `${p.id}:${p.version ?? ""}:${fingerprint(JSON.stringify(p.files ?? {}))}`;
+  const menuSig = useRef<Record<string, string>>({});
   useEffect(() => {
     for (const p of plugins.plugins) {
-      if (!p.ruby || p.enabled === false || rubyMenus[p.id]) continue;
-      runRuby(p, {}).then((r) => setRubyMenus((m) => ({ ...m, [p.id]: r.error ? { error: r.error } : r.menu })));
+      if (!p.ruby || p.enabled === false) continue;
+      const sig = rubySig(p);
+      if (rubyMenus[p.id] && menuSig.current[p.id] === sig) continue;
+      menuSig.current[p.id] = sig;
+      runRuby(p, {}).then((r) => {
+        if (menuSig.current[p.id] === sig) setRubyMenus((m) => ({ ...m, [p.id]: r.error ? { error: r.error } : r.menu }));
+      });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [plugins]);
@@ -67,7 +82,7 @@ export function usePlugins({ sel, scene, tool, setTool, say, sayAs, runForPlugin
       units: scene?.units || "m",
       run: (cmd) => runForPlugin(cmd, plugin),
       show: (result, pl) => setPluginShown({ result, plugin: pl }),
-      toast: (t, bad) => sayAs(plugin, t, bad),
+      toast: (t, bad, undo) => sayAs(plugin, t, bad, undo),
       ask: (form, pl) => new Promise((resolve) => setPluginForm({ form, plugin: pl, done: (a) => (setPluginForm(null), resolve(a)) })),
       preview: (lines) => setPluginTool((p) => (p ? { ...p, preview: lines } : p)),
       hint: (text) => setPluginTool((p) => (p ? { ...p, hint: plugin.builtin ? text : `Plugin: ${text}` } : p)),
@@ -133,7 +148,7 @@ export function usePlugins({ sel, scene, tool, setTool, say, sayAs, runForPlugin
       if (r.journal.length > MAX_COMMANDS) return say(`${plugin.name} made ${r.journal.length} changes in one run; the most is ${MAX_COMMANDS}, so none were applied.`, true);
       let failed = "";
       // everything it recorded is ONE undo step (and one save)
-      const batch = batcher();
+      const batch = batcher((br) => announceChange(br, { toast: (t, bad, undo) => sayAs(plugin, t, bad, undo) }));
       try {
         await batch.begin();
         // replaying has the same wall-clock limit as a JavaScript plugin run (one command can be slow, 10,000 can take hours)
@@ -144,7 +159,7 @@ export function usePlugins({ sel, scene, tool, setTool, say, sayAs, runForPlugin
             break;
           }
           // Ruby's recorded commands are plugin commands too: same limits as JavaScript plugins
-          const res = await execPlugin(cmd);
+          const res = await execPlugin(cmd, plugin.name);
           if (!res.ok) {
             failed = `step ${i + 1} (${String(cmd.cmd)}): ${res.error}`;
             break;
@@ -173,7 +188,7 @@ export function usePlugins({ sel, scene, tool, setTool, say, sayAs, runForPlugin
       units: scene?.units || "m",
       run: (cmd) => runForPlugin(cmd, plugin),
       show: (result, pl) => setPluginShown({ result, plugin: pl }),
-      toast: (t, bad) => sayAs(plugin, t, bad),
+      toast: (t, bad, undo) => sayAs(plugin, t, bad, undo),
       ask: (form, pl) =>
         new Promise((resolve) =>
           setPluginForm({

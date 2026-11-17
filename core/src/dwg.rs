@@ -54,8 +54,8 @@ pub fn converter() -> Option<&'static str> {
     }
 }
 
-fn run(mut c: Command) -> Result<()> {
-    let out = c.output()?;
+fn run(c: Command) -> Result<()> {
+    let out = crate::helper::run(c, crate::helper::DWG).map_err(|e| anyhow::anyhow!("the DWG converter: {}", crate::helper::why(&e)))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         bail!("the DWG converter failed: {}", err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("no message"));

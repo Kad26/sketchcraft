@@ -187,6 +187,14 @@ pub struct Engine {
     /// set while `environment` runs its own fixed list of commands: they run as the person (the policy check passed for the
     /// whole), but keep the limits of whoever asked for it
     nested_untrusted: bool,
+    /// who made each undo step (`you`, `plugin “X”`, `an agent`), oldest first; kept the same length as `undo`
+    step_origins: Vec<String>,
+    /// the same for the redo list
+    redo_origins: Vec<String>,
+    /// who the open batch's changes are from (the last plugin to send a command into it)
+    batch_origin: Option<String>,
+    /// what the last batch that a plugin made changed: who, and how many things (read by `end_batch`'s reply)
+    last_batch: Option<(String, usize)>,
 }
 
 /// A batch nobody closed (the app went away mid-run) is closed after this (a plugin run is
@@ -235,8 +243,75 @@ impl Engine {
     }
 
     pub fn exec_value_as(&mut self, caller: &Caller, v: Value) -> Value {
+        self.exec_value_as_from(caller, v, None)
+    }
+
+    /// Like `exec_value_as`; `from` names the plugin that sent the command (set by the app, never by the
+    /// plugin), so the undo step it makes says who made it.
+    pub fn exec_value_as_from(&mut self, caller: &Caller, v: Value, from: Option<&str>) -> Value {
         // a panic anywhere (not only inside a command) is an error reply
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.exec_value_inner(caller, v))).unwrap_or_else(|_| json!({"ok": false, "error": "SketchCraft hit a bug running that."}))
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.exec_value_tracked(caller, v, from))).unwrap_or_else(|_| json!({"ok": false, "error": "SketchCraft hit a bug running that."}))
+    }
+
+    /// Who an undo step is from, for the history: the person, a named plugin, or an agent.
+    pub fn origin_label(caller: &Caller, from: Option<&str>) -> String {
+        match caller {
+            Caller::Ui => "you".into(),
+            Caller::Mcp(_) => "an agent".into(),
+            Caller::Plugin => match from.map(|f| f.chars().filter(|c| !c.is_control() && *c != '“' && *c != '”').take(40).collect::<String>()).filter(|f| !f.trim().is_empty()) {
+                Some(n) => format!("plugin “{}”", n.trim()),
+                None => "a plugin".into(),
+            },
+        }
+    }
+
+    /// Who made the step Undo would take back, and the one Redo would do again.
+    pub fn undo_origin(&self) -> Option<&str> {
+        if self.undo.is_empty() { None } else { self.step_origins.last().map(String::as_str) }
+    }
+    pub fn redo_origin(&self) -> Option<&str> {
+        if self.redo.is_empty() { None } else { self.redo_origins.last().map(String::as_str) }
+    }
+
+    /// Keep each step's origin beside the step: the commands that push or take steps say who made them.
+    fn exec_value_tracked(&mut self, caller: &Caller, v: Value, from: Option<&str>) -> Value {
+        let label = Self::origin_label(caller, from);
+        let cmd = v.get("cmd").and_then(Value::as_str).unwrap_or("").to_string();
+        let (u0, r0) = (self.undo.len(), self.redo.len());
+        // a plugin's commands inside a batch make the batch the plugin's
+        if self.batch.is_some() && !matches!(caller, Caller::Ui) {
+            self.batch_origin = Some(label.clone());
+        }
+        let mut r = self.exec_value_inner(caller, v);
+        let (ul, rl) = (self.undo.len(), self.redo.len());
+        match cmd.as_str() {
+            "undo" | "redo" if r["ok"] == true => {
+                let back = cmd == "undo";
+                let (from_list, from_n, to_list, grew) = if back { (&mut self.step_origins, u0.saturating_sub(ul), &mut self.redo_origins, rl > r0) } else { (&mut self.redo_origins, r0.saturating_sub(rl), &mut self.step_origins, ul > u0) };
+                let mut last = None;
+                for _ in 0..from_n {
+                    last = from_list.pop();
+                }
+                let who = last.unwrap_or_else(|| "an earlier change".into());
+                if grew {
+                    to_list.push(who.clone());
+                }
+                if let Some(o) = r.as_object_mut() {
+                    o.insert("origin".into(), json!(who));
+                }
+            }
+            _ => {
+                while self.step_origins.len() < ul {
+                    self.step_origins.push(label.clone());
+                }
+                self.step_origins.truncate(ul);
+            }
+        }
+        self.redo_origins.truncate(rl);
+        while self.redo_origins.len() < rl {
+            self.redo_origins.insert(0, "an earlier change".into());
+        }
+        r
     }
 
     fn exec_value_inner(&mut self, caller: &Caller, mut v: Value) -> Value {
@@ -296,9 +371,13 @@ impl Engine {
 
     /// Close a batch: everything since it began is ONE undo step.
     fn end_batch(&mut self) {
+        let who = self.batch_origin.take();
         if let Some((before, rev, _)) = self.batch.take() {
             if self.revision != rev {
+                // a plugin's run: say how much it changed (the app tells the person)
+                self.last_batch = who.as_ref().map(|w| (w.clone(), crate::history::patch_between(&before, &self.model).things()));
                 self.undo.push(Step::Snap(Box::new(before)));
+                self.step_origins.push(who.unwrap_or_else(|| "you".into()));
                 self.redo.clear();
                 self.trim_undo();
             }
@@ -342,6 +421,9 @@ impl Engine {
     pub fn install_history(&mut self, h: crate::history::History) -> (usize, usize) {
         self.undo = h.undo;
         self.redo = h.redo;
+        // what each step was made by isn't carried across another program's save
+        self.step_origins = vec!["an earlier change".to_string(); self.undo.len()];
+        self.redo_origins = vec!["an earlier change".to_string(); self.redo.len()];
         self.refused = None;
         self.trim_undo();
         (h.dropped, h.dropped_redo)
@@ -641,6 +723,9 @@ impl Engine {
         while self.undo.len() > UNDO_LIMIT || (self.undo.len() > 1 && total > if self.undo_budget == 0 { UNDO_BYTES } else { self.undo_budget }) {
             total = total.saturating_sub(self.undo[0].approx_bytes());
             self.undo.remove(0);
+            if !self.step_origins.is_empty() {
+                self.step_origins.remove(0);
+            }
         }
         // what Redo holds counts against the same memory (patches are small; copies are not)
         let limit = if self.undo_budget == 0 { UNDO_BYTES } else { self.undo_budget };
@@ -648,6 +733,9 @@ impl Engine {
         while self.redo.len() > 1 && redo_total > limit {
             redo_total = redo_total.saturating_sub(self.redo[0].approx_bytes());
             self.redo.remove(0);
+            if !self.redo_origins.is_empty() {
+                self.redo_origins.remove(0);
+            }
         }
     }
 

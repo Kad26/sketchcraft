@@ -1,5 +1,5 @@
 // Signed self-updates. A few seconds after launch (and every six hours) the
-// desktop app reads latest.json from the newest GitHub release; Tauri checks
+// desktop app reads latest-v2.json from the newest GitHub release (older installs read latest.json: docs/SIGNING.md, "Key rotation"); Tauri checks
 // each download against the public key in tauri.conf.json before installing.
 // When an install can't be done in place (a .deb or .rpm, a failed download),
 // the card offers the download page instead.

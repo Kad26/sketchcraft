@@ -133,6 +133,9 @@ export interface SectionInfo {
 }
 
 export interface Scene {
+  /** who made the step Undo would take back / Redo would do again: "you", "plugin “X”", "an agent" */
+  undo_origin?: string | null;
+  redo_origin?: string | null;
   /** section planes, and the one cutting now */
   sections?: SectionInfo[];
   /** drawing axes moved with the Axes tool: origin, red, green */
@@ -233,7 +236,8 @@ export const exec = (cmd: Record<string, unknown>) => (inTauri ? invoke<Reply>("
  * plugin management (core/src/policy.rs). Anything a plugin triggers goes
  * through here, never through `exec`.
  */
-export const execPlugin = (cmd: Record<string, unknown>) => (inTauri ? invoke<Reply>("exec", { cmd, source: "plugin" }) : http<Reply>("/exec?as=plugin", cmd));
+export const execPlugin = (cmd: Record<string, unknown>, plugin?: string) =>
+  inTauri ? invoke<Reply>("exec", { cmd, source: "plugin", plugin: plugin ?? null }) : http<Reply>(`/exec?as=plugin${plugin ? `&plugin=${encodeURIComponent(plugin.slice(0, 80))}` : ""}`, cmd);
 export const loadScene = () => (inTauri ? invoke<Scene>("scene") : http<Scene>("/scene"));
 export const sync = () => (inTauri ? invoke<boolean>("sync") : http<boolean>("/sync"));
 

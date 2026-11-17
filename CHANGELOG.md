@@ -6,7 +6,46 @@ What changed in each SketchCraft release, newest first. The format follows
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-11-17
+
+### Fixed
+- **SketchUp files from every version open.** Files saved by SketchUp 2013 to
+  2020 were refused ("not a SketchUp 2013+ archive"); they now import with their
+  geometry, components and colours. Files from SketchUp 2021 and later (including
+  SketchUp 27 and SketchUp for Web) now place all their components; some came in
+  looking empty. Tested on SketchUp's own test models from versions 6 to 27, and on
+  hundreds of damaged files, which are refused in under a second. (Textures in
+  2017-2020 files come in as colours for now; that's planned for 0.3.8.) (#1)
+- **The window drags by its title bar while it's focused** on macOS. Before, it
+  only moved when another window was in front. (#2)
+- **Push/Pull repeat** (double-click a face to push it the same distance again)
+  never worked; it does now.
+
 ### Security
+- **Final pre-release pass.**
+  - Plugins and agents: a plugin run that changes your model now says so
+    ("Plugin X changed 3 things", with an Undo button), the Undo and Redo buttons
+    say when the step is from a plugin, and when you open SketchCraft after an AI
+    agent saved changes you're told. The plugin install preview shows the same
+    kind (JavaScript or Ruby) and Ruby menu items that the installer uses, and a
+    plugin that is both is refused. Agents can no longer start programs (animate, IFC and DWG are
+    yours alone), every helper program has a time limit and is stopped with
+    everything it started, `--any-path` keeps the Backups, Plugins and hidden-file
+    rules, and long or odd names in an agent's replies are cut and marked as data.
+  - Your files: a model no longer records the folder a library part came from (older
+    files lose it when opened), built-in doors, windows and figures can't be
+    swapped by a component with the same name, and a library part is reused only if
+    it is the same file contents.
+  - Releases: the Rust version is pinned (CI is green again on newer Rust), each
+    platform's installers are checked for their own names and file types before
+    signing, only the Tauri CLI is installed next to the signing key, release
+    files get build-provenance attestations, and a vendored Opal's unused network
+    loader is removed. CI also checks that dependencies come from public registries only and
+    that what ships has no high npm advisory.
+  - Smaller: the plugin warning banner stays readable under any theme, a
+    remembered Save path must end in `.sketchcraft`, the dev bridge deletes its token
+    file when it stops, and the committed MCP setup holds no personal folder.
+
 - **Hardening after a red-team review.** Your model is safer: it's saved
   atomically with rolling backups, a file that can't be read is kept aside
   instead of replaced, and a bad command can no longer corrupt it. Plugins
@@ -353,7 +392,8 @@ The first build with installers (never published as a release).
   import and export, and PNG renders with dimensions and labels.
 - Installers for macOS, Windows and Linux, and the CLI for each.
 
-[Unreleased]: https://github.com/jasonsutter87/sketchcraft/compare/v0.3.5...HEAD
+[Unreleased]: https://github.com/jasonsutter87/sketchcraft/compare/v0.3.6...HEAD
+[0.3.6]: https://github.com/jasonsutter87/sketchcraft/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/jasonsutter87/sketchcraft/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/jasonsutter87/sketchcraft/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/jasonsutter87/sketchcraft/compare/v0.3.2...v0.3.3

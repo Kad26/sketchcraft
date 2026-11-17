@@ -79,6 +79,8 @@ pub struct Live {
     held: bool,
     /// the side files this run wrote (names): the cap holds even when the index can't be read
     own_side: Vec<String>,
+    /// this is the person's own window (the app, the dev bridge), the one that tells them what an agent changed
+    person_view: bool,
 }
 
 /// "Left out: ..." for a notice: what was skipped, with the reasons.
@@ -102,15 +104,28 @@ fn weight(m: &crate::model::Model) -> usize {
     m.faces.len() + m.instances.len() + m.groups.len() + m.definitions.values().map(|d| weight(&d.model)).sum::<usize>()
 }
 
-/// True when this process is a Rust test program: a unit test (`cfg!(test)`), a program cargo put in
-/// a `deps/` folder (every test program is built there, whatever the target folder is called: a
-/// custom `CARGO_TARGET_DIR` works), or one that sets `SKETCHCRAFT_TESTING`. The shipped programs
-/// run from a `release/` folder or an install folder, never from `deps/`.
+/// True when this process is a Rust test program. Positive signals first: a unit test
+/// (`cfg!(test)`) or `SKETCHCRAFT_TESTING`. Cargo gives an integration-test program no run-time
+/// environment variable that `cargo run` lacks (`CARGO_TARGET_TMPDIR` is compile-time only), so the
+/// rest is the program's folder layout, in both layouts cargo has used: test programs sit in a
+/// `deps/` folder, or (Rust 1.100 and later) in `build/<package>/<hash>/out/`. The shipped programs
+/// run from a `release/` folder or an install folder, never from either layout.
 pub fn running_as_cargo_test() -> bool {
-    if cfg!(test) || std::env::var_os("SKETCHCRAFT_TESTING").is_some_and(|v| !v.is_empty() && v != "0") {
+    let on = |k: &str| std::env::var_os(k).is_some_and(|v| !v.is_empty() && v != "0");
+    if cfg!(test) || on("SKETCHCRAFT_TESTING") {
         return true;
     }
-    std::env::current_exe().ok().is_some_and(|p| p.parent().and_then(|d| d.file_name()).is_some_and(|n| n == "deps"))
+    std::env::current_exe().ok().is_some_and(|p| exe_in_test_layout(&p))
+}
+
+pub fn exe_in_test_layout(p: &Path) -> bool {
+    let dirs: Vec<&std::ffi::OsStr> = p.parent().map(|d| d.components().map(|c| c.as_os_str()).collect()).unwrap_or_default();
+    let n = dirs.len();
+    if n >= 1 && dirs[n - 1] == "deps" {
+        return true;
+    }
+    // .../build/<package>/<hash>/out
+    n >= 4 && dirs[n - 1] == "out" && dirs[n - 4] == "build"
 }
 
 /// Where the person's model folder is. `SKETCHCRAFT_DOC` always wins (and scopes every folder
@@ -142,7 +157,7 @@ impl Live {
     }
 
     fn blank(engine: Engine, doc: PathBuf, persist: bool) -> Self {
-        Live { engine, doc, seen: None, persist, last_backup: None, notice: None, notice_at: None, unsaved_batch: false, batch_weight: 0, batch_destructive: false, blocked: false, retry_after: None, dirty: false, sticky: None, last_forced: HashMap::new(), held: false, own_side: vec![] }
+        Live { engine, doc, seen: None, persist, last_backup: None, notice: None, notice_at: None, unsaved_batch: false, batch_weight: 0, batch_destructive: false, blocked: false, retry_after: None, dirty: false, sticky: None, last_forced: HashMap::new(), held: false, own_side: vec![], person_view: false }
     }
 
     /// A model that is not saved anywhere.
@@ -416,6 +431,11 @@ impl Live {
     }
 
     pub fn exec_as(&mut self, caller: &Caller, cmd: &Value) -> Value {
+        self.exec_as_from(caller, cmd, None)
+    }
+
+    /// `from`: the plugin the app is running this for (named by the app, never by the plugin).
+    pub fn exec_as_from(&mut self, caller: &Caller, cmd: &Value, from: Option<&str>) -> Value {
         self.tick();
         let name = cmd["cmd"].as_str().unwrap_or("");
         // the person's own list of backups and the restore (only the app's own user; never a plugin or an agent)
@@ -437,7 +457,7 @@ impl Live {
         let size = |e: &Engine| weight(&e.model);
         let (before, size_before, depth_before) = (self.engine.revision(), size(&self.engine), self.engine.undo_depth());
         let destructive = DESTRUCTIVE.contains(&name);
-        let mut r = self.engine.exec_value_as(caller, cmd.clone());
+        let mut r = self.engine.exec_value_as_from(caller, cmd.clone(), from);
         // the person starting over (or opening something else) after the model file couldn't be read: saving resumes
         if (self.held || self.blocked) && r["ok"] == true && matches!(caller, Caller::Ui) && matches!(name, "new" | "open") {
             self.held = false;
@@ -498,6 +518,9 @@ impl Live {
             match self.save_with(force) {
                 Ok(()) => {
                     self.dirty = false;
+                    if changed && matches!(caller, Caller::Mcp(_)) {
+                        self.record_agent_change();
+                    }
                     if self.notice.as_deref().is_some_and(|n| n.starts_with("Couldn't save")) {
                         self.notice = None;
                     }
@@ -638,7 +661,11 @@ impl Live {
                 return ok;
             }
             self.seen = now;
-            return self.load(false);
+            let ok = self.load(false);
+            if ok {
+                self.announce_agent();
+            }
+            return ok;
         }
         false
     }
@@ -673,11 +700,57 @@ impl Live {
         }
     }
 
+    // ---- What an agent changed ------------------------------------------------------------
+
+    /// The small hidden file beside the model that remembers agent saves until the person's window has said so.
+    fn agent_note_path(&self) -> PathBuf {
+        self.doc.with_file_name(format!(".{}.agent-activity", self.stem()))
+    }
+
+    /// An agent's save went into the file: remember it (how many, first and last time) for the person's window.
+    fn record_agent_change(&mut self) {
+        if !self.persist {
+            return;
+        }
+        let p = self.agent_note_path();
+        let old: Value = std::fs::read_to_string(&p).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
+        let now = epoch(SystemTime::now());
+        let n = old["saves"].as_u64().unwrap_or(0).saturating_add(1);
+        let first = old["first"].as_u64().unwrap_or(now);
+        let _ = crate::safety::write_atomic(&p, json!({"saves": n, "first": first, "last": now}).to_string().as_bytes());
+    }
+
+    /// This is the person's own window: it tells them about agent changes (once), including ones made while
+    /// the app was closed. Call it after opening the model.
+    pub fn as_person_view(&mut self) {
+        self.person_view = true;
+        self.announce_agent();
+    }
+
+    fn announce_agent(&mut self) {
+        if !self.person_view || !self.persist {
+            return;
+        }
+        let p = self.agent_note_path();
+        let Some(v) = std::fs::read_to_string(&p).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) else { return };
+        let _ = std::fs::remove_file(&p);
+        let (n, last) = (v["saves"].as_u64().unwrap_or(1), v["last"].as_u64().unwrap_or(0));
+        let ago = epoch(SystemTime::now()).saturating_sub(last);
+        let when = if ago < 90 { "just now".to_string() } else if ago < 5400 { format!("{} minutes ago", ago / 60) } else if ago < 172_800 { format!("{} hours ago", ago / 3600) } else { format!("{} days ago", ago / 86_400) };
+        self.set_notice(format!(
+            "Agent changed this model: {n} save{} by an AI agent, the last {when}. They aren't in your Undo list (an agent's steps belong to its own session); File > Restore from backup... has the version from before.",
+            if n == 1 { "" } else { "s" }
+        ));
+    }
+
     pub fn scene(&self) -> Value {
         // a model that is damaged in some way nobody thought of must not take the bridge or the app down on every poll
         let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::scene::build(&self.engine.model, self.engine.ctx)));
         let mut s = built.unwrap_or_else(|_| json!({"faces": [], "edges": [], "error": "SketchCraft couldn't draw this model (it holds something inconsistent). Restore from a backup (File > Restore from backup...) or open another file."}));
         s["doc"] = json!(self.doc);
+        // who made the step Undo (and Redo) would take back, so the buttons can say
+        s["undo_origin"] = json!(self.engine.undo_origin());
+        s["redo_origin"] = json!(self.engine.redo_origin());
         if let (Some(n), Some(at)) = (&self.notice, self.notice_at) {
             if SystemTime::now().duration_since(at).unwrap_or_default() < NOTICE_FOR || self.blocked || self.dirty || self.engine.oversize || self.sticky.as_ref().is_some_and(|p| p.exists()) {
                 s["notice"] = json!(n);

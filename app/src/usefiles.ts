@@ -3,7 +3,7 @@
 import type { RefObject } from "react";
 import type { Reply, Scene } from "./engine";
 import { exec } from "./engine";
-import { pickOpen, pickSave } from "./files";
+import { isModelPath, pickOpen, pickSave } from "./files";
 import type { Sel } from "./selection";
 import { EMPTY } from "./selection";
 import type { ViewportApi } from "./Viewport";
@@ -164,7 +164,8 @@ export function useFileActions({ run, say, refresh, api, scene, figure, currentF
       setSel(EMPTY);
     },
     save: async (as = false) => {
-      let path = currentFile;
+      // a remembered path is checked again here: it only ever names a .sketchcraft file
+      let path = isModelPath(currentFile) ? currentFile : null;
       if (!path || as) {
         path = await pickSave(currentFile?.split("/").pop() ?? "Untitled.sketchcraft", "sketchcraft", "SketchCraft model");
         if (!path) return;

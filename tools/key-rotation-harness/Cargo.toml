@@ -1,0 +1,15 @@
+# Dev-only rehearsal client for the 0.3.6 key rotation (docs/SIGNING.md). Not part of the app's
+# workspace and never shipped. Uses only crates already in the root Cargo.lock (same versions).
+[package]
+name = "key-rotation-harness"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+minisign-verify = "0.3"
+base64 = "0.22"
+serde_json = "1"
+semver = "1"
+
+[workspace]

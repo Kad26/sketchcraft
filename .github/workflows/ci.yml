@@ -13,8 +13,8 @@ permissions:
 
 # Every third-party action is pinned to a full commit SHA (version in the
 # trailing comment); Dependabot (.github/dependabot.yml) proposes updates.
-# The rust-toolchain action is pinned to the head of its `stable` branch, so
-# the toolchain is named explicitly with `toolchain: stable`.
+# The rust-toolchain action is pinned to a commit on its `1.99.1` branch (that branch installs exactly
+# that Rust); rust-toolchain.toml names the same version for local builds (a step checks the comments).
 
 jobs:
   test:
@@ -30,9 +30,17 @@ jobs:
             echo "::error::Pin every action above to a full 40-character commit SHA."
             exit 1
           fi
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-        with:
-          toolchain: stable
+      - name: CI and rust-toolchain.toml name the same Rust version
+        run: |
+          pinned=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
+          for f in .github/workflows/ci.yml .github/workflows/release.yml; do
+            # the action is pinned to a commit on its version branch; the comment names that version
+            if grep -E '^[[:space:]]*- uses: dtolnay/rust-toolchain@' "$f" | grep -vqF "# rust ${pinned} (its version branch)"; then
+              echo "::error::$f installs a Rust version other than rust-toolchain.toml ($pinned)."
+              exit 1
+            fi
+          done
+      - uses: dtolnay/rust-toolchain@263313d2989f864a2b8613f97277288638e7d8f8 # rust 1.99.1 (its version branch)
       - name: Engine tests
         run: cargo test --locked -p sketchcraft-core
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -51,3 +59,32 @@ jobs:
       - name: App checks (skin values, plugin sandbox lockdown, plugin data)
         working-directory: app
         run: npm run check
+
+  # (The scale-figure generator's `--check` is not run here: its sine and cosine come out a last digit
+  # different on Linux than on a Mac for four of the figures, so the check is only stable on the machine
+  # that made the files. Run `python3 tools/scale_figures/scale_figures.py --check` before changing them.)
+
+  # Light dependency check, no secrets and nothing installed beyond what the app already has: the
+  # shipped npm packages have no known high advisory, and no lockfile takes code from anywhere but
+  # the crates.io / npm registries. (`cargo audit` isn't run here: it would mean installing an
+  # unpinned tool in CI; run it by hand before a release.)
+  audit:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - name: Lockfiles only name the public registries
+        run: |
+          if grep -h '"resolved"' app/package-lock.json tools/release/package-lock.json | grep -v 'https://registry.npmjs.org/'; then
+            echo "::error::a package comes from somewhere other than registry.npmjs.org"; exit 1
+          fi
+          if grep -n '^source = ' Cargo.lock | grep -v 'registry+https://github.com/rust-lang/crates.io-index'; then
+            echo "::error::a crate comes from somewhere other than crates.io"; exit 1
+          fi
+      - name: No high advisory in the packages the app ships
+        working-directory: app
+        run: npm audit --omit=dev --audit-level=high

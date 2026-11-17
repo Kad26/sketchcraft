@@ -165,6 +165,19 @@ impl Patch {
         self.parts.iter().all(|(_, c)| matches!(c, Change::Keys(k) if k.is_empty()))
     }
 
+    /// How many things the step changed: faces, edges, groups, placements and components (the points and
+    /// the other bookkeeping that come with them aren't counted twice), and each small part replaced whole.
+    pub fn things(&self) -> usize {
+        self.parts
+            .iter()
+            .map(|(name, c)| match c {
+                Change::Whole(..) => 1,
+                Change::Keys(k) if matches!(name.as_str(), "faces" | "edges" | "groups" | "instances" | "definitions" | "clouds") => k.len(),
+                Change::Keys(k) => usize::from(!k.is_empty()),
+            })
+            .sum()
+    }
+
     /// Put `forward` (false: the step's "before") on top of `current`. Err names what stands in the way.
     pub fn apply(&self, current: &Model, forward: bool) -> Result<Model, String> {
         // the small parts of the model go through JSON; the big maps (points, edges, faces...) are worked entry by entry

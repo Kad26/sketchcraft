@@ -71,6 +71,8 @@ Tracked on GitHub as the **0.3.8 — Texturing** milestone.
 | 7 | **Textures in SketchUp 2017–2020 imports** | timrowledge (GitHub #1) | 2026-11-17 | planned | |
 | 8 | **Lightmap UV channel (UV2)** for game engines | SketchUp pain-point research | 2026-11-17 | planned | |
 | 9 | **FBX export** | SketchUp pain-point research | 2026-11-17 | planned | |
+| 10 | **Blocky Beaver**: a voxel-style mascot with a pixel-art skin and a skin template, the test model for every texturing feature (#47) | Jason | 2026-11-17 | planned | |
+| 11 | **Texturing test set**: dice, can, globe, crate, soccer ball, with reference renders in the tests (#48) | Jason | 2026-11-17 | planned | |
 
 Sprints 5 to 9 come from research into what SketchUp users complain about most (forums, reviews, extension stores). See [ROADMAP.md](ROADMAP.md) for the why.
 

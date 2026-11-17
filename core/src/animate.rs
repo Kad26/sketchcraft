@@ -110,17 +110,18 @@ pub fn animate_cams(m: &Model, path: &str, cams: &[CameraSpec], fps: f64, base: 
         bail!("rendering a frame failed: {e}");
     }
     if video {
-        let out = std::process::Command::new("ffmpeg")
-            .args(["-y", "-loglevel", "error", "-framerate"])
+        let mut c = std::process::Command::new("ffmpeg");
+        c.args(["-y", "-loglevel", "error", "-framerate"])
             .arg(format!("{}", fps.clamp(1.0, 60.0)))
             .arg("-i")
             .arg(dir.join("frame_%05d.png"))
             .args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2"])
-            .arg(crate::safety::path_arg(path))
-            .output();
+            .arg(crate::safety::path_arg(path));
+        let out = crate::helper::run(c, crate::helper::VIDEO);
         match out {
             Ok(o) if o.status.success() => {}
             Ok(o) => bail!("ffmpeg couldn't make the video: {}", String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("")),
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => bail!("ffmpeg {}", e),
             Err(_) => bail!("making a video needs ffmpeg installed; or give a folder path to get the frames as PNGs"),
         }
     }

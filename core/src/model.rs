@@ -77,6 +77,16 @@ pub struct Group {
     pub locked: bool,
 }
 
+/// A model file written before 0.3.6 holds the absolute path of the library file; keep only its name,
+/// so a home folder never travels with a shared model or reaches an agent.
+fn de_source<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    let v: Option<String> = Option::deserialize(d)?;
+    Ok(v.map(|s| match s.rfind(['/', '\\']) {
+        Some(i) => s[i + 1..].to_string(),
+        None => s,
+    }))
+}
+
 /// A reusable piece (door, window, tree): geometry kept once, placed many
 /// times. Editing the definition updates every placement.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -88,8 +98,10 @@ pub struct Definition {
     /// defaults for its placements' Dynamic Component attributes
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub attrs: BTreeMap<String, String>,
-    /// the library file it came from (placing that file again reuses it)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// the library file it came from, as `<file name>#<hash of its bytes>` (placing the same file again
+    /// reuses it; a changed or different file with the same name doesn't). Never a folder path: an older
+    /// file's absolute path is cut down to the file name when the model is read (CASHOUT-004).
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "de_source")]
     pub source: Option<String>,
     /// placed on a face, it cuts an opening there (doors, windows)
     #[serde(default, skip_serializing_if = "is_false")]

@@ -55,19 +55,20 @@ impl Engine {
             Command::VideoFinish { session, path, fps } => {
                 let dir = video_dir(&session)?;
                 let ext = if dir.join("frame_00000.jpg").exists() { "jpg" } else { "png" };
-                let out = std::process::Command::new("ffmpeg")
-                    .args(["-y", "-loglevel", "error", "-framerate"])
+                let mut c = std::process::Command::new("ffmpeg");
+                c.args(["-y", "-loglevel", "error", "-framerate"])
                     .arg(format!("{}", fps.clamp(1.0, 60.0)))
                     .arg("-i")
                     .arg(dir.join(format!("frame_%05d.{ext}")))
                     .args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18", "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2"])
-                    .arg(crate::safety::path_arg(&path))
-                    .output();
+                    .arg(crate::safety::path_arg(&path));
+                let out = crate::helper::run(c, crate::helper::VIDEO);
                 let frames = std::fs::read_dir(&dir).map(|d| d.count()).unwrap_or(0);
                 std::fs::remove_dir_all(&dir).ok();
                 match out {
                     Ok(o) if o.status.success() => json!({"path": path, "frames": frames}),
                     Ok(o) => bail!("ffmpeg couldn't make the video: {}", String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("")),
+                    Err(e) if e.kind() == std::io::ErrorKind::TimedOut => bail!("ffmpeg {}", e),
                     Err(_) => bail!("making a video needs ffmpeg installed (brew install ffmpeg)"),
                 }
             }
