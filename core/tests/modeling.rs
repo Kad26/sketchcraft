@@ -616,6 +616,87 @@ fn solid_tools_union_subtract_intersect_split() {
 }
 
 #[test]
+fn trim_keeps_nested_hardware_editable_under_the_result() {
+    let mut e = Engine::new();
+    let assembly = run(&mut e, json!({"cmd":"begin_group","name":"Assembly"}))["group"].as_u64().unwrap();
+    let leaf = box_group(&mut e, [0.0, 0.0, 0.0], [0.9, 0.044, 2.1], "Door leaf");
+    run(&mut e, json!({"cmd":"end_group"}));
+    let handle = box_group(&mut e, [0.68, 0.044, 0.95], [0.76, 0.084, 0.965], "Handle");
+    let hinge_box = box_group(&mut e, [0.0, 0.044, 0.2], [0.02, 0.055, 0.265], "Hinge");
+    let hinge = run(&mut e, json!({"cmd":"make_component","ids":[hinge_box],"name":"Hinge"}))["instance"].as_u64().unwrap();
+    run(&mut e, json!({"cmd":"set_parent","ids":[handle,hinge],"parent":leaf}));
+    run(&mut e, json!({"cmd":"tag","ids":[leaf],"tag":"Wood"}));
+    run(&mut e, json!({"cmd":"lock","ids":[handle]}));
+    let cutter = box_group(&mut e, [0.8, -0.01, 0.8], [0.825, 0.054, 0.9], "Cutter");
+    let handle_faces = run(&mut e, json!({"cmd":"faces","group":handle}));
+    let hinge_transform = e.model.instances[&(hinge as u32)].transform;
+
+    let result = run(&mut e, json!({"cmd":"solid","op":"trim","ids":[cutter,leaf]}))["group"].as_u64().unwrap();
+    assert!((volume(&mut e, result) - 0.08305).abs() < 1e-6);
+    assert_eq!(e.model.groups[&(result as u32)].parent, Some(assembly as u32));
+    assert_eq!(e.model.groups[&(result as u32)].tag.as_deref(), Some("Wood"));
+    assert!(e.model.groups.contains_key(&(cutter as u32)));
+    assert_eq!(e.model.groups[&(handle as u32)].parent, Some(result as u32));
+    assert!(e.model.groups[&(handle as u32)].locked);
+    assert_eq!(run(&mut e, json!({"cmd":"faces","group":handle})), handle_faces);
+    assert_eq!(e.model.instances[&(hinge as u32)].parent, Some(result as u32));
+    assert_eq!(e.model.instances[&(hinge as u32)].transform, hinge_transform);
+    run(&mut e, json!({"cmd":"lock","ids":[handle],"locked":false}));
+    run(&mut e, json!({"cmd":"edit","id":handle}));
+    assert_eq!(e.model.active_group, Some(handle as u32));
+}
+
+#[test]
+fn trim_rejects_inconsistent_faces_and_inward_shells() {
+    for reverse_whole_shell in [false, true] {
+        let mut e = Engine::new();
+        let target = box_group(&mut e, [3.0, 5.0, 7.0], [4.0, 6.0, 8.0], "Target");
+        let cutter = box_group(&mut e, [3.25, 5.25, 6.9], [3.75, 5.75, 8.1], "Cutter");
+        let reversed = if reverse_whole_shell {
+            target
+        } else {
+            run(&mut e, json!({"cmd":"faces","group":target,"facing":[0,0,1]}))["faces"][0]["id"].as_u64().unwrap()
+        };
+        run(&mut e, json!({"cmd":"reverse","ids":[reversed]}));
+        let before = run(&mut e, json!({"cmd":"info"}));
+
+        let r = e.exec_json(&json!({"cmd":"solid","op":"trim","ids":[cutter,target]}).to_string());
+        assert_eq!(r["ok"], false, "{r}");
+        let reason = if reverse_whole_shell { "inward-facing faces" } else { "inconsistently oriented faces" };
+        assert!(r["error"].as_str().unwrap().contains(reason), "{r}");
+        assert_eq!(run(&mut e, json!({"cmd":"info"})), before);
+    }
+}
+
+#[test]
+fn trim_rejects_an_inward_shell_beside_a_larger_outward_shell() {
+    let mut e = Engine::new();
+    let large = box_group(&mut e, [0.0, 0.0, 0.0], [2.0, 2.0, 2.0], "Large");
+    let small = box_group(&mut e, [3.0, 0.0, 0.0], [4.0, 1.0, 1.0], "Small");
+    run(&mut e, json!({"cmd":"reverse","ids":[small]}));
+    let target = run(&mut e, json!({"cmd":"make_component","ids":[large,small],"name":"Target"}))["instance"].as_u64().unwrap();
+    let cutter = box_group(&mut e, [0.5, 0.5, 1.0], [1.5, 1.5, 3.0], "Cutter");
+    let before = run(&mut e, json!({"cmd":"info"}));
+
+    let r = e.exec_json(&json!({"cmd":"solid","op":"trim","ids":[cutter,target]}).to_string());
+    assert_eq!(r["ok"], false, "{r}");
+    assert!(r["error"].as_str().unwrap().contains("inward-facing faces"), "{r}");
+    assert_eq!(run(&mut e, json!({"cmd":"info"})), before);
+}
+
+#[test]
+fn trim_supports_an_enclosed_cavity() {
+    let mut e = Engine::new();
+    let target = box_group(&mut e, [0.0, 0.0, 0.0], [2.0, 2.0, 2.0], "Target");
+    let cavity = box_group(&mut e, [0.5, 0.5, 0.5], [1.5, 1.5, 1.5], "Cavity");
+    let hollow = run(&mut e, json!({"cmd":"solid","op":"subtract","ids":[cavity,target]}))["group"].as_u64().unwrap();
+    assert!((volume(&mut e, hollow) - 7.0).abs() < 1e-6);
+    let drill = box_group(&mut e, [0.75, 0.75, 1.25], [1.25, 1.25, 2.5], "Drill");
+    let result = run(&mut e, json!({"cmd":"solid","op":"trim","ids":[drill,hollow]}))["group"].as_u64().unwrap();
+    assert!((volume(&mut e, result) - 6.875).abs() < 1e-6);
+}
+
+#[test]
 fn subtracting_a_cylinder_leaves_a_hole_that_is_still_solid() {
     let mut e = Engine::new();
     let slab = box_group(&mut e, [0.0, 0.0, 0.0], [4.0, 4.0, 0.5], "Slab");

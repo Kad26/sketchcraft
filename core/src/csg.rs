@@ -11,7 +11,7 @@ use crate::mesh::Mesh;
 use crate::model::{Id, Material, Model};
 use anyhow::{bail, Result};
 use glam::DVec3;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 const EPS: f64 = 1e-7;
 /// A boolean that splits more pieces than this stops with an error instead
@@ -271,6 +271,10 @@ pub fn boolean(a: Vec<Poly>, b: Vec<Poly>, op: Op) -> Result<Vec<Poly>> {
 /// The faces of a top-level group or a component instance, in world
 /// coordinates, as triangles. Errors if `id` is neither, or isn't closed.
 pub fn solid_polys(m: &mut Model, id: Id) -> Result<Vec<Poly>> {
+    solid_polys_with_orientation(m, id, false)
+}
+
+fn solid_polys_with_orientation(m: &mut Model, id: Id, require_outward: bool) -> Result<Vec<Poly>> {
     let is_group = m.groups.contains_key(&id);
     if !is_group && !m.instances.contains_key(&id) {
         bail!("{id} is not a group or component");
@@ -279,7 +283,8 @@ pub fn solid_polys(m: &mut Model, id: Id) -> Result<Vec<Poly>> {
     if faces.is_empty() {
         bail!("{id} has no faces");
     }
-    let open = open_edges(faces.iter().map(|f| (&f.outer, &f.holes)));
+    let mut face_shells: Vec<usize> = if require_outward { (0..faces.len()).collect() } else { Vec::new() };
+    let (open, inconsistent) = inspect_edges(faces.iter().map(|f| (&f.outer, &f.holes)), &mut face_shells);
     if !open.is_empty() {
         let at = open[0];
         bail!(
@@ -292,8 +297,17 @@ pub fn solid_polys(m: &mut Model, id: Id) -> Result<Vec<Poly>> {
             at.z
         );
     }
+    if require_outward {
+        if let Some(at) = inconsistent {
+            bail!(
+                "{} has inconsistently oriented faces near [{:.3}, {:.3}, {:.3}]: orient the faces before trimming",
+                name_of(m, id), at.x, at.y, at.z
+            );
+        }
+    }
     let mut out = Vec::new();
-    for f in faces {
+    let mut shells: BTreeMap<usize, Vec<Poly>> = BTreeMap::new();
+    for (face, f) in faces.into_iter().enumerate() {
         let material = material_key(m, &f);
         // straight runs don't matter to the boolean (the result gets its
         // shared corners back), and they'd triangulate into slivers
@@ -302,11 +316,19 @@ pub fn solid_polys(m: &mut Model, id: Id) -> Result<Vec<Poly>> {
         if outer.len() < 3 {
             continue;
         }
+        let polygons = if require_outward { shells.entry(face_shells[face]).or_default() } else { &mut out };
         for t in geom::triangulate(&outer, &holes, f.normal) {
             if let Some(p) = Poly::new(t.to_vec(), material.clone()) {
-                out.push(p);
+                polygons.push(p);
             }
         }
+    }
+    if require_outward {
+        let shells: Vec<_> = shells.into_values().collect();
+        if !shells_are_oriented(&shells) {
+            bail!("{} has inward-facing faces or no enclosed volume: orient the faces before trimming", name_of(m, id));
+        }
+        out = shells.into_iter().flatten().collect();
     }
     Ok(out)
 }
@@ -368,38 +390,109 @@ fn key(p: DVec3) -> (i64, i64, i64) {
     ((p.x * 1e5).round() as i64, (p.y * 1e5).round() as i64, (p.z * 1e5).round() as i64)
 }
 
-/// Midpoints of edges not used by exactly two faces (counting every loop).
-fn open_edges<'a>(faces: impl Iterator<Item = (&'a Vec<DVec3>, &'a Vec<Vec<DVec3>>)>) -> Vec<DVec3> {
-    let mut uses: HashMap<((i64, i64, i64), (i64, i64, i64)), i32> = HashMap::new();
-    let mut mid: HashMap<((i64, i64, i64), (i64, i64, i64)), DVec3> = HashMap::new();
-    for (outer, holes) in faces {
+/// Edges without exactly two uses and the first shared edge with the same
+/// boundary direction on both faces. Inner loops count as face boundaries.
+fn inspect_edges<'a>(
+    faces: impl Iterator<Item = (&'a Vec<DVec3>, &'a Vec<Vec<DVec3>>)>,
+    face_shells: &mut [usize],
+) -> (Vec<DVec3>, Option<DVec3>) {
+    let mut uses = HashMap::new();
+    for (face, (outer, holes)) in faces.enumerate() {
         for l in std::iter::once(outer).chain(holes.iter()) {
             for i in 0..l.len() {
                 let (a, b) = (key(l[i]), key(l[(i + 1) % l.len()]));
                 if a != b {
-                    *uses.entry((a.min(b), a.max(b))).or_default() += 1;
-                    mid.insert((a.min(b), a.max(b)), (l[i] + l[(i + 1) % l.len()]) / 2.0);
+                    let midpoint = (l[i] + l[(i + 1) % l.len()]) / 2.0;
+                    let (count, direction, _, first_face) =
+                        uses.entry((a.min(b), a.max(b))).or_insert((0, 0, midpoint, face));
+                    if !face_shells.is_empty() && *count == 1 {
+                        let a = shell_root(face_shells, *first_face);
+                        let b = shell_root(face_shells, face);
+                        face_shells[a.max(b)] = a.min(b);
+                    }
+                    *count += 1;
+                    *direction += if a < b { 1 } else { -1 };
                 }
             }
         }
     }
-    let mut out: Vec<DVec3> = uses.iter().filter(|(_, n)| **n != 2).map(|(k, _)| mid[k]).collect();
+    for face in 0..face_shells.len() {
+        face_shells[face] = shell_root(face_shells, face);
+    }
+    let mut out: Vec<DVec3> = uses.values().filter(|(n, _, _, _)| *n != 2).map(|(_, _, mid, _)| *mid).collect();
     out.sort_by(|a, b| key(*a).cmp(&key(*b)));
     if std::env::var("CSG_DEBUG").is_ok() {
-        for (k, n) in uses.iter().filter(|(_, n)| **n != 2) {
+        for (k, (n, _, _, _)) in uses.iter().filter(|(_, (n, _, _, _))| *n != 2) {
             eprintln!("open edge {k:?} used {n}");
         }
     }
-    out
+    let inconsistent = uses.values().filter(|(n, direction, _, _)| *n == 2 && *direction != 0)
+        .map(|(_, _, mid, _)| *mid).min_by_key(|mid| key(*mid));
+    (out, inconsistent)
+}
+
+fn shell_root(parents: &mut [usize], mut face: usize) -> usize {
+    while parents[face] != face {
+        parents[face] = parents[parents[face]];
+        face = parents[face];
+    }
+    face
 }
 
 /// Volume enclosed by a closed surface (m³).
 pub fn volume(polys: &[Poly]) -> f64 {
+    signed_volume(polys, DVec3::ZERO).abs()
+}
+
+fn signed_volume(polys: &[Poly], origin: DVec3) -> f64 {
     polys
         .iter()
-        .flat_map(|p| (1..p.pts.len() - 1).map(move |k| p.pts[0].dot(p.pts[k].cross(p.pts[k + 1])) / 6.0))
+        .flat_map(|p| {
+            let first = p.pts[0] - origin;
+            (1..p.pts.len() - 1).map(move |k| {
+                first.dot((p.pts[k] - origin).cross(p.pts[k + 1] - origin)) / 6.0
+            })
+        })
         .sum::<f64>()
-        .abs()
+}
+
+/// For a closed triangle shell, the sum of signed solid angles is ±4π
+/// inside and 0 outside. This avoids ray hits on shared triangle edges.
+fn shell_contains(shell: &[Poly], point: DVec3) -> bool {
+    let angle: f64 = shell.iter().map(|p| {
+        let (a, b, c) = (p.pts[0] - point, p.pts[1] - point, p.pts[2] - point);
+        let (la, lb, lc) = (a.length(), b.length(), c.length());
+        let denominator = la * lb * lc + a.dot(b) * lc + b.dot(c) * la + c.dot(a) * lb;
+        2.0 * a.dot(b.cross(c)).atan2(denominator)
+    }).sum();
+    angle.abs() > 2.0 * std::f64::consts::PI
+}
+
+fn shells_are_oriented(shells: &[Vec<Poly>]) -> bool {
+    if shells.is_empty() || shells.iter().any(Vec::is_empty) {
+        return false;
+    }
+    let volumes: Vec<_> = shells.iter().map(|s| signed_volume(s, s[0].pts[0])).collect();
+    if volumes.iter().any(|v| !v.is_finite() || *v == 0.0) || volumes.iter().sum::<f64>() <= 0.0 {
+        return false;
+    }
+    if shells.len() == 1 {
+        return true;
+    }
+    let bounds: Vec<_> = shells.iter().map(|shell| {
+        let first = shell[0].pts[0];
+        shell.iter().flat_map(|p| &p.pts).fold((first, first), |(lo, hi), &p| (lo.min(p), hi.max(p)))
+    }).collect();
+    // Inner boundaries must face into the cavity. A disconnected inward
+    // shell cannot pass just because a separate outward shell is larger.
+    volumes.iter().enumerate().all(|(i, volume)| {
+        let (lo, hi) = bounds[i];
+        let point = shells[i][0].pts[0];
+        let surrounding = bounds.iter().enumerate().filter(|(j, (outer_lo, outer_hi))| {
+            outer_lo.cmplt(lo).all() && outer_hi.cmpgt(hi).all() && shell_contains(&shells[*j], point)
+        }).count();
+        (surrounding % 2 == 1) == (*volume < 0.0)
+    })
 }
 
 /// Turn a polygon soup into faces of a new top-level group: pieces on the
@@ -603,6 +696,9 @@ pub fn to_group(m: &mut Model, polys: &[Poly], name: &str) -> Result<Id> {
 /// for subtract and trim the first one cuts the second). Returns the
 /// resulting group(s).
 pub fn solid(m: &mut Model, op: &str, ids: &[Id]) -> Result<Vec<Id>> {
+    if op == "trim" {
+        return trim(m, ids).map(|group| vec![group]);
+    }
     if ids.len() < 2 {
         bail!("pick at least two solids");
     }
@@ -613,7 +709,7 @@ pub fn solid(m: &mut Model, op: &str, ids: &[Id]) -> Result<Vec<Id>> {
     }
     let name = |m: &Model, id: Id| name_of(m, id);
     // results land where the shape being worked on sat in the hierarchy
-    let keep = if matches!(op, "subtract" | "trim") { ids[1] } else { ids[0] };
+    let keep = if op == "subtract" { ids[1] } else { ids[0] };
     let parent = m.groups.get(&keep).and_then(|g| g.parent).or_else(|| m.instances.get(&keep).and_then(|i| i.parent));
     let out = match op {
         "union" | "outer_shell" => {
@@ -634,13 +730,13 @@ pub fn solid(m: &mut Model, op: &str, ids: &[Id]) -> Result<Vec<Id>> {
             m.delete(ids)?;
             vec![to_group(m, &acc, &nm)?]
         }
-        "subtract" | "trim" => {
+        "subtract" => {
             if ids.len() != 2 {
                 bail!("{op} takes two solids: the cutter, then the one to cut");
             }
             let nm = name(m, ids[1]);
             let r = boolean(polys[1].clone(), polys[0].clone(), Op::Subtract)?;
-            m.delete(if op == "subtract" { ids } else { &ids[1..] })?;
+            m.delete(ids)?;
             vec![to_group(m, &r, &nm)?]
         }
         "split" => {
@@ -668,6 +764,52 @@ pub fn solid(m: &mut Model, op: &str, ids: &[Id]) -> Result<Vec<Id>> {
         }
     }
     Ok(out)
+}
+
+/// Trim only the target's shell. A group's attached hardware stays editable.
+fn trim(m: &mut Model, ids: &[Id]) -> Result<Id> {
+    let &[cutter, target] = ids else {
+        bail!("trim takes two different solids: the cutter, then the one to cut");
+    };
+    if cutter == target {
+        bail!("trim takes two different solids: the cutter, then the one to cut");
+    }
+    m.check_unlocked(&[target])?;
+    if m.groups.values().any(|g| g.parent == Some(cutter))
+        || m.instances.values().any(|i| i.parent == Some(cutter))
+    {
+        bail!("{} contains nested objects: select a single solid as the cutter", name_of(m, cutter));
+    }
+    for id in ids {
+        if m.instances.get(id).and_then(|i| m.definitions.get(&i.def))
+            .is_some_and(|d| !d.model.groups.is_empty() || !d.model.instances.is_empty())
+        {
+            bail!("{} contains nested objects in its definition: select an individual solid to trim", name_of(m, *id));
+        }
+    }
+    let cutter_polys = solid_polys_with_orientation(m, cutter, true)?;
+    let target_polys = solid_polys_with_orientation(m, target, true)?;
+    let result = boolean(target_polys, cutter_polys, Op::Subtract)?;
+    let name = name_of(m, target);
+    let replacement = to_group(m, &result, &name)?;
+    if let Some(group) = m.groups.get(&target).cloned() {
+        m.groups.insert(replacement, group);
+        for child in m.groups.values_mut().filter(|g| g.parent == Some(target)) {
+            child.parent = Some(replacement);
+        }
+        for child in m.instances.values_mut().filter(|i| i.parent == Some(target)) {
+            child.parent = Some(replacement);
+        }
+    } else if let Some(instance) = m.instances.get(&target) {
+        let group = m.groups.get_mut(&replacement).unwrap();
+        group.parent = instance.parent;
+        group.tag = instance.tag.clone();
+    }
+    if m.active_group == Some(target) {
+        m.active_group = Some(replacement);
+    }
+    m.delete(&[target])?;
+    Ok(replacement)
 }
 
 /// Is this group / instance a closed solid, and how big is it?
