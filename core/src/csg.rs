@@ -300,7 +300,7 @@ fn solid_polys_with_orientation(m: &mut Model, id: Id, require_outward: bool) ->
     if require_outward {
         if let Some(at) = inconsistent {
             bail!(
-                "{} has inconsistently oriented faces near [{:.3}, {:.3}, {:.3}]: orient the faces before trimming",
+                "{} has inconsistently oriented faces near [{:.3}, {:.3}, {:.3}]: orient the faces before cutting",
                 name_of(m, id), at.x, at.y, at.z
             );
         }
@@ -326,7 +326,7 @@ fn solid_polys_with_orientation(m: &mut Model, id: Id, require_outward: bool) ->
     if require_outward {
         let shells: Vec<_> = shells.into_values().collect();
         if !shells_are_oriented(&shells) {
-            bail!("{} has inward-facing faces or no enclosed volume: orient the faces before trimming", name_of(m, id));
+            bail!("{} has inward-facing faces or no enclosed volume: orient the faces before cutting", name_of(m, id));
         }
         out = shells.into_iter().flatten().collect();
     }
@@ -696,8 +696,8 @@ pub fn to_group(m: &mut Model, polys: &[Poly], name: &str) -> Result<Id> {
 /// for subtract and trim the first one cuts the second). Returns the
 /// resulting group(s).
 pub fn solid(m: &mut Model, op: &str, ids: &[Id]) -> Result<Vec<Id>> {
-    if op == "trim" {
-        return trim(m, ids).map(|group| vec![group]);
+    if matches!(op, "trim" | "subtract") {
+        return cut(m, ids, op == "subtract").map(|group| vec![group]);
     }
     if ids.len() < 2 {
         bail!("pick at least two solids");
@@ -709,7 +709,7 @@ pub fn solid(m: &mut Model, op: &str, ids: &[Id]) -> Result<Vec<Id>> {
     }
     let name = |m: &Model, id: Id| name_of(m, id);
     // results land where the shape being worked on sat in the hierarchy
-    let keep = if op == "subtract" { ids[1] } else { ids[0] };
+    let keep = ids[0];
     let parent = m.groups.get(&keep).and_then(|g| g.parent).or_else(|| m.instances.get(&keep).and_then(|i| i.parent));
     let out = match op {
         "union" | "outer_shell" => {
@@ -729,15 +729,6 @@ pub fn solid(m: &mut Model, op: &str, ids: &[Id]) -> Result<Vec<Id>> {
             }
             m.delete(ids)?;
             vec![to_group(m, &acc, &nm)?]
-        }
-        "subtract" => {
-            if ids.len() != 2 {
-                bail!("{op} takes two solids: the cutter, then the one to cut");
-            }
-            let nm = name(m, ids[1]);
-            let r = boolean(polys[1].clone(), polys[0].clone(), Op::Subtract)?;
-            m.delete(ids)?;
-            vec![to_group(m, &r, &nm)?]
         }
         "split" => {
             if ids.len() != 2 {
@@ -766,15 +757,18 @@ pub fn solid(m: &mut Model, op: &str, ids: &[Id]) -> Result<Vec<Id>> {
     Ok(out)
 }
 
-/// Trim only the target's shell. A group's attached hardware stays editable.
-fn trim(m: &mut Model, ids: &[Id]) -> Result<Id> {
+/// Cut only the target shell so the group's attached hardware stays editable.
+/// Subtract consumes the cutter after a cut. Trim keeps it.
+fn cut(m: &mut Model, ids: &[Id], consume_cutter: bool) -> Result<Id> {
+    let op = if consume_cutter { "subtract" } else { "trim" };
     let &[cutter, target] = ids else {
-        bail!("trim takes two different solids: the cutter, then the one to cut");
+        bail!("{op} takes two different solids: the cutter, then the one to cut");
     };
     if cutter == target {
-        bail!("trim takes two different solids: the cutter, then the one to cut");
+        bail!("{op} takes two different solids: the cutter, then the one to cut");
     }
-    m.check_unlocked(&[target])?;
+    let removed = if consume_cutter { ids } else { &ids[1..] };
+    m.check_unlocked(removed)?;
     if m.groups.values().any(|g| g.parent == Some(cutter))
         || m.instances.values().any(|i| i.parent == Some(cutter))
     {
@@ -784,12 +778,25 @@ fn trim(m: &mut Model, ids: &[Id]) -> Result<Id> {
         if m.instances.get(id).and_then(|i| m.definitions.get(&i.def))
             .is_some_and(|d| !d.model.groups.is_empty() || !d.model.instances.is_empty())
         {
-            bail!("{} contains nested objects in its definition: select an individual solid to trim", name_of(m, *id));
+            bail!("{} contains nested objects in its definition: select an individual solid", name_of(m, *id));
         }
     }
     let cutter_polys = solid_polys_with_orientation(m, cutter, true)?;
     let target_polys = solid_polys_with_orientation(m, target, true)?;
+    let origin = target_polys[0].pts[0];
+    let before = consume_cutter.then(|| signed_volume(&target_polys, origin));
     let result = boolean(target_polys, cutter_polys, Op::Subtract)?;
+    if let Some(before) = before {
+        let after = signed_volume(&result, origin);
+        let tolerance = before.abs() * 1e-9;
+        if !after.is_finite() || after < -tolerance || after > before + tolerance {
+            bail!("subtract could not produce a valid cut");
+        }
+        // A cutter that misses or only touches the target should stay in place.
+        if before - after <= tolerance {
+            bail!("the cutter and the target do not overlap in volume");
+        }
+    }
     let name = name_of(m, target);
     let replacement = to_group(m, &result, &name)?;
     if let Some(group) = m.groups.get(&target).cloned() {
@@ -808,7 +815,7 @@ fn trim(m: &mut Model, ids: &[Id]) -> Result<Id> {
     if m.active_group == Some(target) {
         m.active_group = Some(replacement);
     }
-    m.delete(&[target])?;
+    m.delete(removed)?;
     Ok(replacement)
 }
 
