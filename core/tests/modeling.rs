@@ -281,6 +281,43 @@ fn rotate_scale_duplicate_array() {
 }
 
 #[test]
+fn moving_a_corner_folds_a_face_without_covering_its_opening() {
+    let mut e = Engine::new();
+    let panel = run(&mut e, json!({"cmd":"rect", "from":[0,0,0], "to":[6,6,0]}))["face"].as_u64().unwrap() as u32;
+    let inset = run(&mut e, json!({"cmd":"rect", "from":[2,2,0], "to":[4,4,0]}))["face"].as_u64().unwrap() as u32;
+    run(&mut e, json!({"cmd":"delete", "ids":[inset]}));
+    run(&mut e, json!({"cmd":"paint", "ids":[panel], "color":[0.2,0.4,0.6]}));
+    let original = e.model.faces[&panel].clone();
+    assert_eq!(original.holes.len(), 1);
+    let old_model = serde_json::to_value(&e.model).unwrap();
+    let corner = original.outer.iter().find(|&&v| e.model.p(v) == DVec3::new(6., 6., 0.)).unwrap();
+    run(&mut e, json!({"cmd":"move", "ids":[corner], "by":[0,0,2]}));
+    assert_eq!(e.model.p(*corner).z, 2.);
+    for (&id, face) in &e.model.faces {
+        assert_eq!(face.outer.len(), 3);
+        assert_eq!(face.material, original.material);
+        assert!(e.model.is_flat(id));
+    }
+    let hole = &original.holes[0];
+    for (a, b) in hole.iter().copied().zip(hole.iter().copied().cycle().skip(1)) {
+        assert_eq!(e.model.faces.values().filter(|face| face.uses_edge(a, b)).count(), 1);
+    }
+    // Lifting vertices vertically leaves the XY projection unchanged.
+    let area: f64 = e.model.faces.values().map(|face| {
+        let [a, b, c] = [e.model.p(face.outer[0]), e.model.p(face.outer[1]), e.model.p(face.outer[2])];
+        (b - a).cross(c - a).z.abs() * 0.5
+    }).sum();
+    assert!((area - (36. - 4.)).abs() < 1e-9);
+    assert!(e.model.edges.values().any(|edge| edge.soft));
+    run(&mut e, json!({"cmd":"undo"}));
+    let mut restored = serde_json::to_value(&e.model).unwrap();
+    // Undo keeps the allocator at its high-water mark.
+    assert!(restored["next_id"].as_u64().unwrap() >= old_model["next_id"].as_u64().unwrap());
+    restored["next_id"] = old_model["next_id"].clone();
+    assert_eq!(restored, old_model);
+}
+
+#[test]
 fn pulling_one_corner_up_folds_the_face() {
     let mut e = Engine::new();
     let f = run(&mut e, json!({"cmd":"rect","from":[0,0,0],"to":[4,4,0]}))["face"].clone();
