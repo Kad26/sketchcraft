@@ -28,6 +28,7 @@ import { autoTagColor, ACCENT, BACKGROUNDS } from "./viewport/colors";
 import { styledEdges, averagedNormals, smoothNormals } from "./viewport/edges";
 import { profileMaterial, textureFor } from "./viewport/materials";
 import { UP, r4, arr, circleThrough, bulgeThrough, basis, arcPoints, offsetOutline } from "./viewport/geometry";
+import { selectMarquee } from "./viewport/marquee";
 import { isTypingTarget } from "./keymap";
 import type { Tool, BuildSettings, FaceStyle, Backdrop, Styles, Cam, ViewportApi, PluginPoint, Props, Op, LabelSpec, Last } from "./viewport/types";
 export { autoTagColor };
@@ -1179,9 +1180,27 @@ export default function Viewport(props: Props) {
   }
 
   function selectionLines(sel: Sel): number[] {
+    const s = sceneNow();
     const out: number[] = [];
     const ids = new Set(sel.edges);
-    for (const e of sceneNow().edgeList) if (ids.has(e.id)) out.push(...e.a, ...e.b);
+    for (const e of s.edgeList) if (ids.has(e.id)) out.push(...e.a, ...e.b);
+    if (s.editing == null && (sel.groups.length || sel.instances.length)) {
+      const triangleOwners = new Set(s.triFace);
+      const closedOwners = new Set(sel.instances.filter((id) => !triangleOwners.has(id)));
+      const wireGroups = new Set<number>();
+      for (const group of sel.groups) {
+        const descendants = subtree(group);
+        const owners = groupFaces(group);
+        if (![...owners].some((id) => triangleOwners.has(id))) descendants.forEach((id) => wireGroups.add(id));
+        for (const inst of s.instances) {
+          if (inst.parent != null && descendants.has(inst.parent) && !triangleOwners.has(inst.id)) closedOwners.add(inst.id);
+        }
+      }
+      for (const edge of s.edgeList) if (edge.group != null && wireGroups.has(edge.group)) closedOwners.add(edge.id);
+      s.edgeIds.forEach((id, i) => {
+        if (closedOwners.has(id) && !ids.has(id)) out.push(...s.edges.slice(i * 6, i * 6 + 6));
+      });
+    }
     return out;
   }
 
@@ -3150,35 +3169,14 @@ export default function Viewport(props: Props) {
       const s = sceneNow();
       const cam = t.current!.camera;
       const r = rect();
-      const [x0, x1] = [Math.min(op.x0, op.x1) - r.left, Math.max(op.x0, op.x1) - r.left];
-      const [y0, y1] = [Math.min(op.y0, op.y1) - r.top, Math.max(op.y0, op.y1) - r.top];
-      const crossing = op.x1 < op.x0;
-      const inside = (p: number[] | THREE.Vector3) => {
-        const v = (Array.isArray(p) ? V(p) : p.clone()).project(cam);
-        const x = (v.x * 0.5 + 0.5) * r.width;
-        const y = (-v.y * 0.5 + 0.5) * r.height;
-        return v.z < 1 && x >= x0 && x <= x1 && y >= y0 && y <= y1;
-      };
-      const test = (pts: (number[] | THREE.Vector3)[]) => (crossing ? pts.some(inside) : pts.every(inside));
-      const out: Sel = { faces: [], edges: [], groups: [], instances: [] };
-      const groupsHit = new Map<number, boolean[]>();
-      for (const f of s.faces) {
-        const ok = test(f.outer);
-        const g = selectableGroup(f.group);
-        if (g != null) groupsHit.set(g, [...(groupsHit.get(g) ?? []), ok]);
-        else if (ok) out.faces.push(f.id);
-      }
-      for (const [g, hits] of groupsHit) if (crossing ? hits.some(Boolean) : hits.every(Boolean)) out.groups.push(g);
-      for (const ed of s.edgeList) if (!ed.soft && (ed.group == null || ed.group === s.activeGroup) && test([ed.a, ed.b])) out.edges.push(ed.id);
-      if (s.editing == null) {
-        for (const inst of s.instances) {
-          const pos = trianglesOf(new Set([inst.id]));
-          const pts: THREE.Vector3[] = [];
-          for (let i = 0; i < pos.length; i += 9) pts.push(new THREE.Vector3(pos[i], pos[i + 1], pos[i + 2]));
-          if (pts.length && test(pts)) out.instances.push(inst.id);
-        }
-      }
-      return out;
+      if (!r.width || !r.height) return EMPTY;
+      const x = (value: number) => 2 * (value - r.left) / r.width - 1;
+      const y = (value: number) => 1 - 2 * (value - r.top) / r.height;
+      const viewProjection = new THREE.Matrix4().multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
+      return selectMarquee(s, viewProjection, {
+        left: x(Math.min(op.x0, op.x1)), right: x(Math.max(op.x0, op.x1)),
+        bottom: y(Math.max(op.y0, op.y1)), top: y(Math.min(op.y0, op.y1)),
+      }, op.x1 < op.x0);
     }
 
     const key = (e: KeyboardEvent) => {
