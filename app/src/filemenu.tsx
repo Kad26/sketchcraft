@@ -1,3 +1,4 @@
+import { useLocale } from "./locale";
 // The File menu in the top bar: files, exports, plugins, and the dialogs the rest of the app opens.
 import { useState, type RefObject } from "react";
 import { inTauri } from "./engine";
@@ -20,6 +21,7 @@ export function FileMenu({ file, section, plugins, livePlugins, setPlugins, runP
   /** the dialogs the menu opens, by what they are */
   open: { restore: () => void; plugins: () => void; sheets: () => void; timeline: () => void; location: () => void; text3d: () => void; keys: () => void; keyEditor: () => void };
 }) {
+  const { t, preference, setPreference } = useLocale();
   const [fileMenu, setFileMenu] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [pluginsOpen, setPluginsOpen] = useState(false);
@@ -27,20 +29,20 @@ export function FileMenu({ file, section, plugins, livePlugins, setPlugins, runP
   return (
   <div className="dropdown">
     <button className="file-btn" onClick={() => setFileMenu((o) => !o)}>
-      File ▾
+      {t("menu.file")} ▾
     </button>
     {fileMenu && (
       <>
         <div className="menu-scrim" onPointerDown={() => setFileMenu(false)} />
         <div className="dropdown-menu file-menu" onClick={() => setFileMenu(false)}>
-          <button onClick={file.new}>New <kbd>⌘N</kbd></button>
-          <button onClick={file.open}>Open… <kbd>⌘O</kbd></button>
-          <button onClick={() => file.save(false)}>Save <kbd>⌘S</kbd></button>
-          <button onClick={() => file.save(true)}>Save As… <kbd>⇧⌘S</kbd></button>
-          <button onClick={() => open.restore()}>Restore from backup…</button>
+          <button onClick={file.new}>{t("menu.new")} <kbd>⌘N</kbd></button>
+          <button onClick={file.open}>{t("menu.open")} <kbd>⌘O</kbd></button>
+          <button onClick={() => file.save(false)}>{t("menu.save")} <kbd>⌘S</kbd></button>
+          <button onClick={() => file.save(true)}>{t("menu.saveAs")} <kbd>⇧⌘S</kbd></button>
+          <button onClick={() => open.restore()}>{t("menu.restore")}</button>
           <hr />
-          <button onClick={file.import}>Import SketchUp, CAD or OBJ… <kbd>⌘I</kbd></button>
-          <button onClick={() => fileRef.current?.click()}>Import from browser upload…</button>
+          <button onClick={file.import}>{t("menu.import")} <kbd>⌘I</kbd></button>
+          <button onClick={() => fileRef.current?.click()}>{t("menu.upload")}</button>
           <button
             className="submenu-btn"
             aria-expanded={exportOpen}
@@ -49,7 +51,7 @@ export function FileMenu({ file, section, plugins, livePlugins, setPlugins, runP
               setExportOpen((o) => !o);
             }}
           >
-            Export <span className="caret">{exportOpen ? "▾" : "▸"}</span>
+            {t("menu.export")} <span className="caret">{exportOpen ? "▾" : "▸"}</span>
           </button>
           {exportOpen && (
             <div className="submenu">
@@ -60,13 +62,13 @@ export function FileMenu({ file, section, plugins, livePlugins, setPlugins, runP
               <button onClick={() => file.export("dxf")}>3D DXF (mm)…</button>
               <button onClick={() => file.export("dwg")}>DWG (AutoCAD)…</button>
               <button onClick={() => file.export("ifc")}>IFC (BIM)…</button>
-              <button onClick={() => file.export("pdf")}>PDF (this view)…</button>
-              <button onClick={file.render}>PNG (this view)…</button>
-              <button onClick={file.animation}>Scene tour (MP4)…</button>
+              <button onClick={() => file.export("pdf")}>{t("menu.pdf")}</button>
+              <button onClick={file.render}>{t("menu.png")}</button>
+              <button onClick={file.animation}>{t("menu.tour")}</button>
               {section && (
                 <>
-                  <button onClick={() => file.section("svg")}>Section cut (SVG)…</button>
-                  <button onClick={() => file.section("dxf")}>Section cut (DXF)…</button>
+                  <button onClick={() => file.section("svg")}>{t("menu.svgSection")}</button>
+                  <button onClick={() => file.section("dxf")}>{t("menu.dxfSection")}</button>
                 </>
               )}
             </div>
@@ -80,7 +82,7 @@ export function FileMenu({ file, section, plugins, livePlugins, setPlugins, runP
               setPluginsOpen((o) => !o);
             }}
           >
-            Plugins <span className="caret">{pluginsOpen ? "▾" : "▸"}</span>
+            {t("menu.plugins")} <span className="caret">{pluginsOpen ? "▾" : "▸"}</span>
           </button>
           {pluginsOpen && (
             <div className="submenu">
@@ -96,23 +98,31 @@ export function FileMenu({ file, section, plugins, livePlugins, setPlugins, runP
                   {p.id}: {p.error}
                 </button>
               ))}
-              <button onClick={() => (reloadPlugins(), open.plugins())}>Manage plugins…</button>
+              <button onClick={() => (reloadPlugins(), open.plugins())}>{t("menu.manage")}</button>
             </div>
           )}
           <hr />
-          <button onClick={file.blueprint}>Make blueprint (PDF)…</button>
-          <button onClick={() => open.sheets()}>Drawing sheets (PDF)…</button>
-          <button onClick={() => open.timeline()}>Timeline (video)…</button>
+          <button onClick={file.blueprint}>{t("menu.blueprint")}</button>
+          <button onClick={() => open.sheets()}>{t("menu.sheets")}</button>
+          <button onClick={() => open.timeline()}>{t("menu.timeline")}</button>
           <hr />
-          <button onClick={() => open.location()}>Add location…</button>
-          <button onClick={() => open.text3d()}>3D Text…</button>
-          <button onClick={file.report}>Generate report (CSV)…</button>
+          <button onClick={() => open.location()}>{t("menu.location")}</button>
+          <button onClick={() => open.text3d()}>{t("menu.text3d")}</button>
+          <button onClick={file.report}>{t("menu.report")}</button>
           <hr />
           <button onClick={() => open.keys()}>
-            Keyboard shortcuts <kbd>{keyText("help.shortcuts")}</kbd>
+            {t("menu.shortcuts")} <kbd>{keyText("help.shortcuts")}</kbd>
           </button>
-          <button onClick={() => open.keyEditor()}>Customize shortcuts…</button>
-          {inTauri && <button onClick={checkForUpdatesNow}>Check for updates…</button>}
+          <button onClick={() => open.keyEditor()}>{t("menu.customize")}</button>
+          {inTauri && <button onClick={checkForUpdatesNow}>{t("menu.updates")}</button>}
+          <label className="language-preference" onClick={(event) => event.stopPropagation()}>
+            {t("language.label")}{" "}
+            <select value={preference} onChange={(event) => setPreference(event.currentTarget.value)}>
+              <option value="system">{t("language.system")}</option>
+              <option value="en" lang="en">English</option>
+              <option value="it" lang="it">Italiano</option>
+            </select>
+          </label>
           <div className="menu-version" title="The version of SketchCraft you're running">
             SketchCraft {__APP_VERSION__}
           </div>

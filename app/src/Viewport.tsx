@@ -1,3 +1,4 @@
+import { useLocale } from "./locale";
 // The 3D view. Draws the engine's scene with three.js and turns mouse and
 // keyboard input into engine commands. Z is up, units are meters.
 import { useEffect, useRef, useState } from "react";
@@ -69,6 +70,9 @@ interface MoveArgs<K extends Op["t"]> {
 }
 
 export default function Viewport(props: Props) {
+  const { language } = useLocale();
+  const localeRef = useRef(language);
+  localeRef.current = language;
   const { scene, tool, styles, placeAsset } = props;
   const host = useRef<HTMLDivElement>(null);
   const labelLayer = useRef<HTMLDivElement>(null);
@@ -1285,7 +1289,7 @@ export default function Viewport(props: Props) {
     const g =
       L.tool === "plugin" && L.pluginTool
         ? { title: L.pluginTool.name, step: L.pluginTool.hint || "Click in the model.", keys: [["Esc", "leave the tool"]] as [string, string][] }
-        : guide(L.tool, { op: op?.t ?? null, stage, selected: selIds(selNow()).length, placing: L.placeAsset });
+        : guide(L.tool, { op: op?.t ?? null, stage, selected: selIds(selNow()).length, placing: L.placeAsset }, localeRef.current);
     const key = `${g.title}|${g.step}|${g.keys.length}`;
     if (key !== coachKey.current) {
       coachKey.current = key;

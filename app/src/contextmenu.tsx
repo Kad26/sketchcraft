@@ -1,3 +1,4 @@
+import { useLocale } from "./locale";
 // The right-click menu: what it offers for the selection, and the menu itself.
 import { useLayoutEffect, useRef, useState } from "react";
 import { ask } from "./ask";
@@ -8,6 +9,7 @@ import { type Run } from "./panelkit";
 import { useEscapeToClose } from "./sheet";
 
 export interface MenuItem {
+  labelId?: string;
   label: string;
   key?: string;
   danger?: boolean;
@@ -31,7 +33,7 @@ export function contextItems(scene: Scene, sel: Sel, run: Run, setSel: (s: Sel) 
   if (one && (sel.groups.length || sel.instances.length)) items.push({ label: `Edit ${sel.groups.length ? "group" : "component"}`, run: () => (run({ cmd: "edit", id: ids[0] }), setSel(EMPTY)) });
   // groups and components selected go inside the new group as they are (nesting)
   if (sel.faces.length || sel.groups.length || sel.instances.length) {
-    items.push({ label: sel.faces.length ? "Make group" : "Group these (nest them)", run: () => run({ cmd: "group", ids: [...sel.faces, ...sel.groups, ...sel.instances] }).then((r) => r.ok && setSel({ ...EMPTY, groups: [r.group as number] })) });
+    items.push({ label: sel.faces.length ? "Make group" : "Group these (nest them)", labelId: sel.faces.length ? "context.group" : "context.nest", run: () => run({ cmd: "group", ids: [...sel.faces, ...sel.groups, ...sel.instances] }).then((r) => r.ok && setSel({ ...EMPTY, groups: [r.group as number] })) });
   }
   if (one && sel.groups.length) {
     const g = scene.groups.find((x) => x.id === ids[0]);
@@ -44,7 +46,7 @@ export function contextItems(scene: Scene, sel: Sel, run: Run, setSel: (s: Sel) 
       label: "Raise walls…",
       run: async () => {
         const units = scene.units || "m";
-        const raw = await ask("Wall height", formatLength(2.7, units), "The thin bands between wall lines go up this high (wall layers first, if the drawing has them).");
+        const raw = await ask("Wall height", formatLength(2.7, units), "The thin bands between wall lines go up this high (wall layers first, if the drawing has them).", "dialog.wallHeight");
         if (raw == null) return;
         const height = parseLength(raw, units);
         if (!(height > 0)) return onToast?.("That isn't a height");
@@ -91,10 +93,10 @@ export function contextItems(scene: Scene, sel: Sel, run: Run, setSel: (s: Sel) 
       });
   if (sel.faces.length || sel.groups.length) {
     items.push({
-      label: "Make component…",
+      label: "Make component…", labelId: "context.component",
       key: "G",
       run: async () => {
-        const name = await ask("Component name", "Component");
+        const name = await ask("Component name", "Component", undefined, "dialog.componentName");
         if (name) run({ cmd: "make_component", ids: [...sel.faces, ...sel.groups], name }).then(() => setSel(EMPTY));
       },
     });
@@ -160,16 +162,17 @@ export function contextItems(scene: Scene, sel: Sel, run: Run, setSel: (s: Sel) 
     tool("Trim (first cuts second, kept)", "trim", true);
     tool("Split", "split", true);
   }
-  if (sel.instances.length) items.push({ label: "Explode", run: () => Promise.all(sel.instances.map((id) => run({ cmd: "explode", id }))).then(() => setSel(EMPTY)) });
-  if (sel.faces.length || sel.groups.length) items.push({ label: "Reverse faces", run: () => run({ cmd: "reverse", ids: [...sel.faces, ...sel.groups] }) });
+  if (sel.instances.length) items.push({ label: "Explode", labelId: "context.explode", run: () => Promise.all(sel.instances.map((id) => run({ cmd: "explode", id }))).then(() => setSel(EMPTY)) });
+  if (sel.faces.length || sel.groups.length) items.push({ label: "Reverse faces", labelId: "context.reverse", run: () => run({ cmd: "reverse", ids: [...sel.faces, ...sel.groups] }) });
   if (sel.edges.length) items.push({ label: "Soften edges", run: () => run({ cmd: "soften", ids: sel.edges }) });
   items.push({ label: "Zoom to selection", key: "⇧Z", run: fitSel });
-  items.push({ label: "Hide", run: () => run({ cmd: "hide", ids }).then(() => setSel(EMPTY)) });
-  items.push({ label: "Delete", key: "⌫", danger: true, run: () => run({ cmd: "delete", ids }).then(() => setSel(EMPTY)) });
+  items.push({ label: "Hide", labelId: "context.hide", run: () => run({ cmd: "hide", ids }).then(() => setSel(EMPTY)) });
+  items.push({ label: "Delete", labelId: "context.delete", key: "⌫", danger: true, run: () => run({ cmd: "delete", ids }).then(() => setSel(EMPTY)) });
   return items;
 }
 
 export function ContextMenu({ x, y, items, close }: { x: number; y: number; items: MenuItem[]; close: () => void }) {
+  const { t } = useLocale();
   useEscapeToClose(close);
   // keep the whole menu on screen: open upward or leftward near an edge
   const box = useRef<HTMLDivElement>(null);
@@ -199,7 +202,7 @@ export function ContextMenu({ x, y, items, close }: { x: number; y: number; item
               it.run();
             }}
           >
-            <span>{it.label}</span>
+            <span>{it.labelId ? t(it.labelId) : it.label}</span>
             {it.key && <kbd>{it.key}</kbd>}
           </button>
         ))}

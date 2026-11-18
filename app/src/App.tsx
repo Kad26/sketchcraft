@@ -1,3 +1,4 @@
+import { LocaleProvider } from "./locale";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { UpdateCard, checkForUpdatesNow } from "./updater";
 import { ask, AskHost } from "./ask";
@@ -116,6 +117,10 @@ const unhex = (h: string): [number, number, number] => [1, 3, 5].map((i) => pars
 
 
 export default function App() {
+  return <LocaleProvider><ModelingApp /></LocaleProvider>;
+}
+
+function ModelingApp() {
   const [scene, setScene] = useState<Scene | null>(null);
   const [tool, setTool] = useState<Tool>("rect");
   const [sel, setSel] = useState<Sel>(EMPTY);
@@ -414,7 +419,7 @@ export default function App() {
   const makeComponent = async () => {
     const ids = [...sel.faces, ...sel.groups];
     if (!ids.length) return say(`Select faces or groups first, then ${keyText("edit.makecomponent") || "Make Component"} makes them a component.`, true);
-    const name = await ask("Component name", "Component");
+    const name = await ask("Component name", "Component", undefined, "dialog.componentName");
     if (name) {
       await run({ cmd: "make_component", ids, name });
       setSel(EMPTY);
@@ -1042,7 +1047,7 @@ export default function App() {
                 <button
                   className="btn small"
                   onClick={async () => {
-                    const name = await ask("Component name", "Component");
+                    const name = await ask("Component name", "Component", undefined, "dialog.componentName");
                     if (name) run({ cmd: "make_component", ids: [...sel.faces, ...sel.groups], name }).then(() => setSel(EMPTY));
                   }}
                 >

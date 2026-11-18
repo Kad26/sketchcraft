@@ -1,3 +1,4 @@
+import { translate, type Language } from "./locale";
 // What to do next, for every tool and every step of it. The viewport shows
 // this beside the model, so a tool explains itself while you use it.
 
@@ -25,15 +26,20 @@ const LOCK: [string, string] = ["→ ← ↑", "lock to red / green / blue"];
 const SHIFT: [string, string] = ["Hold ⇧", "lock this direction"];
 const ESC: [string, string] = ["Esc", "cancel"];
 
-export function guide(tool: Tool, c: GuideCtx): Guide {
+export function guide(tool: Tool, c: GuideCtx, language: Language = "en"): Guide {
+  const t = (id: string) => translate(language, `selection.${id}`);
   const g = (title: string, step: string, keys: [string, string][] = []): Guide => ({ title, step, keys });
   const busy = c.op != null;
   switch (tool) {
-    case "select":
-      if (c.op === "box") return g("Select", "Release to pick. Left-to-right takes what's inside the box; right-to-left, what it touches.", [["⇧", "add or remove"]]);
+    case "select": {
+      const title = translate(language, "tool.select");
+      const open: [string, string] = [t("double"), t("open")];
+      const toggle: [string, string] = [t("shiftClick"), t("toggle")];
+      if (c.op === "box") return g(title, t("box"), [["⇧", t("toggle")]]);
       return c.selected
-        ? g("Select", `${c.selected} selected. M moves, Q rotates, S scales, Delete erases; right-click for more.`, [["⇧ click", "add or remove"], ["Double-click", "open a group"], ["⌘T", "select none"]])
-        : g("Select", "Click something to select it, or drag a box around things.", [["⇧ click", "add or remove"], ["Double-click", "open a group"], ["Space", "back here from any tool"]]);
+        ? g(title, t("selected").replace("{count}", String(c.selected)), [toggle, open, ["⌘T", t("none")]])
+        : g(title, t("empty"), [toggle, open, ["Space", t("back")]]);
+    }
     case "line":
       return busy ? g("Line", "Click the next point. Close the shape to make a face.", [TYPE, LOCK, SHIFT, ["Esc", "stop drawing"]]) : g("Line", "Click where the line starts.", [LOCK]);
     case "rect":
