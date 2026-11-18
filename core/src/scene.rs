@@ -119,11 +119,12 @@ pub fn build(root: &Model, ctx: Option<u32>) -> Value {
         }
         None => (root, glam::DMat4::IDENTITY),
     };
+    let mirrored = t.determinant() < 0.0;
     let faces: Vec<Value> = m
         .faces
         .iter()
         .map(|(&id, f)| {
-            let outer: Vec<_> = m.pts(&f.outer).into_iter().map(|p| t.transform_point3(p)).collect();
+            let outer = m.placed_loop(&f.outer, t, mirrored);
             json!({
                 "id": id,
                 "normal": geom::newell(&outer).to_array(),
@@ -139,7 +140,7 @@ pub fn build(root: &Model, ctx: Option<u32>) -> Value {
     let (mut edit_pos, mut edit_tri) = (Vec::<f32>::new(), Vec::<u32>::new());
     if ctx.is_some() {
         for (&id, f) in &m.faces {
-            let tp = |l: &[u32]| -> Vec<glam::DVec3> { m.pts(l).into_iter().map(|p| t.transform_point3(p)).collect() };
+            let tp = |vertices: &[u32]| m.placed_loop(vertices, t, mirrored);
             let outer = tp(&f.outer);
             let holes: Vec<_> = f.holes.iter().map(|h| tp(h)).collect();
             for tri in geom::triangulate(&outer, &holes, geom::newell(&outer)) {

@@ -88,6 +88,15 @@ impl Model {
         out
     }
 
+    pub(crate) fn placed_loop(&self, vertices: &[Id], t: DMat4, mirrored: bool) -> Vec<DVec3> {
+        let mut points: Vec<_> = vertices.iter().map(|id| t.transform_point3(self.p(*id))).collect();
+        // A reflection changes handedness, but preserves the front of the face.
+        if mirrored {
+            points.reverse();
+        }
+        points
+    }
+
     /// A component's own size (its definition's bounds), for Dynamic
     /// Component lengths.
     fn def_size(root: &Model, def: &crate::model::Definition) -> DVec3 {
@@ -115,6 +124,7 @@ impl Model {
         if depth > crate::nesting::MAX_NEST {
             return;
         }
+        let mirrored = t.determinant() < 0.0;
         for (&id, f) in &self.faces {
             if out.len() >= crate::nesting::MAX_EXPANDED {
                 return;
@@ -122,7 +132,7 @@ impl Model {
             if f.hidden || !self.group_visible(f.group) {
                 continue;
             }
-            let tp = |l: &[Id]| -> Vec<DVec3> { l.iter().map(|v| t.transform_point3(self.p(*v))).collect() };
+            let tp = |vertices: &[Id]| self.placed_loop(vertices, t, mirrored);
             let outer = tp(&f.outer);
             let normal = geom::newell(&outer);
             out.push(WFace {

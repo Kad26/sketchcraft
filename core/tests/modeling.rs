@@ -713,6 +713,40 @@ fn trim_supports_an_enclosed_cavity() {
 }
 
 #[test]
+fn mirrored_component_keeps_outward_faces_in_the_scene_and_trim() {
+    let mut e = Engine::new();
+    let panel = box_group(&mut e, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0], "Panel");
+    let component = run(&mut e, json!({"cmd":"make_component","ids":[panel],"name":"Panel"}));
+    let instance = component["instance"].as_u64().unwrap();
+    let definition = component["component"].as_u64().unwrap();
+    run(&mut e, json!({"cmd":"scale","ids":[instance],"center":[0,0,0],"factor":[-1,1,1]}));
+    let center = DVec3::new(-0.5, 0.5, 0.5);
+    let faces = e.model.world_faces();
+    assert_eq!(faces.len(), 6);
+    assert!(faces.iter().all(|face| face.normal.dot(face.outer[0] - center) > 0.0));
+
+    let edit_scene = sketchcraft::scene::build(&e.model, Some(definition as u32));
+    let point = |values: &[Value]| DVec3::new(values[0].as_f64().unwrap(), values[1].as_f64().unwrap(), values[2].as_f64().unwrap());
+    let edit_faces = edit_scene["faces"].as_array().unwrap();
+    assert_eq!(edit_faces.len(), 6);
+    for face in edit_faces {
+        let normal = point(face["normal"].as_array().unwrap());
+        let corner = point(face["outer"][0].as_array().unwrap());
+        assert!(normal.dot(corner - center) > 0.0, "editable face points inward: {face}");
+    }
+    let triangles = edit_scene["editPositions"].as_array().unwrap();
+    assert_eq!(triangles.len(), 12 * 9);
+    for tri in triangles.chunks_exact(9) {
+        let (a, b, c) = (point(&tri[0..3]), point(&tri[3..6]), point(&tri[6..9]));
+        assert!((b - a).cross(c - a).dot(a - center) > 0.0, "editable triangle points inward");
+    }
+
+    let cutter = box_group(&mut e, [-0.75, 0.25, -0.1], [-0.25, 0.75, 1.1], "Cutter");
+    let cut = run(&mut e, json!({"cmd":"solid","op":"trim","ids":[cutter,instance]}))["group"].as_u64().unwrap();
+    assert!((volume(&mut e, cut) - 0.75).abs() < 1e-9);
+}
+
+#[test]
 fn subtracting_a_cylinder_leaves_a_hole_that_is_still_solid() {
     let mut e = Engine::new();
     let slab = box_group(&mut e, [0.0, 0.0, 0.0], [4.0, 4.0, 0.5], "Slab");
