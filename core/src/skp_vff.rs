@@ -25,7 +25,7 @@
 //!                          each 0x1195/0xfa0 edge use: 0xfa1 edge id,
 //!                          0xfa2 reversed
 //!         0x138d/0x1d4c/0x1964  instance: 0x1965 definition GUID,
-//!                          0x1966 13 f64 (x axis, y axis, z axis, origin, scale)
+//!                          0x1966 13 f64 (3 row-major basis rows, origin, scale)
 //!         0x1390/0x1f40/0x1964  a picture, placed like an instance
 //!         0x138c/0x1964    instance (SketchUp 27): 0x1965 is empty and
 //!                          0x1967 names the definition by the id of its
@@ -406,10 +406,11 @@ fn entities(e: &Node, keys: &Keys, tiles: &mut HashMap<u64, Vec<f64>>) -> Entiti
                 let m = i.get(0x1966).map(|m| m.f64s()).unwrap_or_default();
                 let t = if m.len() >= 13 {
                     let s = if m[12].abs() > 1e-12 { 1.0 / m[12] } else { 1.0 };
+                    // The file stores basis rows; glam takes columns.
                     DMat4::from_cols(
-                        DVec4::new(m[0], m[1], m[2], 0.0),
-                        DVec4::new(m[3], m[4], m[5], 0.0),
-                        DVec4::new(m[6], m[7], m[8], 0.0),
+                        DVec4::new(m[0], m[3], m[6], 0.0),
+                        DVec4::new(m[1], m[4], m[7], 0.0),
+                        DVec4::new(m[2], m[5], m[8], 0.0),
                         DVec4::new(m[9] * s, m[10] * s, m[11] * s, 1.0),
                     )
                 } else {

@@ -121,6 +121,28 @@ fn imports_a_sketchup_27_skp() {
     assert!((min_x - 10.0 * 0.0254).abs() < 1e-9, "placed by the instance transform: {min_x}");
 }
 
+#[test]
+fn vff_placements_keep_their_rotation_through_nested_components() {
+    use base64::Engine as _;
+    // Both placement layouts use the same transform record. The inner
+    // rotation sends +Y to +Z, and the outer rotation sends +X to +Y.
+    for su27 in [false, true] {
+        let mut e = Engine::new();
+        let data = base64::engine::general_purpose::STANDARD.encode(rotated_modern_skp(su27));
+        run(&mut e, json!({"cmd":"import_skp","data":data}));
+        let faces = e.model.world_faces();
+        assert_eq!(faces.len(), 1);
+        for corner in [[7.0, 22.0, 34.0], [7.0, 122.0, 34.0], [7.0, 22.0, 134.0]] {
+            let expected = glam::DVec3::from_array(corner) * 0.0254;
+            assert!(
+                faces[0].outer.iter().any(|point| point.distance(expected) < 1e-9),
+                "SU27={su27}, expected {expected:?} in {:?}",
+                faces[0].outer,
+            );
+        }
+    }
+}
+
 /// Files from SketchUp 2013-2020 use the classic layout, not the 2021+ ZIP
 /// (issue #1: they were refused as "not a SketchUp 2013+ archive").
 #[test]

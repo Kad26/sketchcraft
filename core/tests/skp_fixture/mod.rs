@@ -149,6 +149,11 @@ pub fn su27_skp() -> Vec<u8> {
     build(None, true, Mode::Plain)
 }
 
+/// Two successive 90° rotations about different axes, with translations.
+pub fn rotated_modern_skp(su27: bool) -> Vec<u8> {
+    build(None, su27, Mode::RotatedPlacements)
+}
+
 /// SketchUp 27 again, but the model's only placement is a picture (an image),
 /// which lives in 0x1390/0x1f40 instead of 0x138c.
 pub fn su27_picture_skp() -> Vec<u8> {
@@ -164,6 +169,7 @@ pub fn only_definitions_skp() -> Vec<u8> {
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
     Plain,
+    RotatedPlacements,
     Picture,
     OnlyDefinitions,
 }
@@ -200,19 +206,29 @@ fn build(texture: Option<&[u8]>, su27: bool, mode: Mode) -> Vec<u8> {
     );
     let guid = b"0000-def";
     let def = recs(0x157c, &[rec(0x157e, if su27 { b"Triangle" } else { guid }), ents]);
-    let mut m = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0f64];
-    m[9] = 10.0; // placed 10 inches along x
-    let xf: Vec<u8> = m.iter().flat_map(|x| x.to_le_bytes()).collect();
     // the triangle's component sits inside an outer component (like the
-    // parts of a cabinet), which the model places 10 inches along x
-    let ident: Vec<u8> = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0f64].iter().flat_map(|x| x.to_le_bytes()).collect();
+    // parts of a cabinet).
+    let (placement, nested) = if mode == Mode::RotatedPlacements {
+        // VFF stores the linear part row by row, followed by translation.
+        (
+            [0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 10.0, 20.0, 30.0, 1.0_f64],
+            [1.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 1.0, 0.0, 2.0, 3.0, 4.0, 1.0_f64],
+        )
+    } else {
+        (
+            [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 10.0, 0.0, 0.0, 1.0_f64],
+            [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0_f64],
+        )
+    };
+    let xf: Vec<u8> = placement.iter().flat_map(|x| x.to_le_bytes()).collect();
+    let nested: Vec<u8> = nested.iter().flat_map(|x| x.to_le_bytes()).collect();
     let outer_guid = b"0000-out";
     let outer = recs(
         0x157c,
-        &[rec(0x157e, if su27 { b"Outer..." } else { outer_guid }), recs(0x1388, &[header(41).concat(), place(guid, 40, &ident)])],
+        &[rec(0x157e, if su27 { b"Outer..." } else { outer_guid }), recs(0x1388, &[header(41).concat(), place(guid, 40, &nested)])],
     );
     let inst = match mode {
-        Mode::Plain => place(outer_guid, 41, &xf),
+        Mode::Plain | Mode::RotatedPlacements => place(outer_guid, 41, &xf),
         Mode::Picture => recs(0x1390, &[recs(0x1f40, &[recs(0x1964, &[rec(0x1965, &[]), rec(0x1966, &xf), rec(0x1967, &[41]), rec(0x1968, &[0xab; 16])])])]),
         Mode::OnlyDefinitions => {
             let a = vert(1, [0.0, 0.0, 0.0]);
