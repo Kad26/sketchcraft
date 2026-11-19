@@ -43,7 +43,7 @@ const ONLY = (process.env.ONLY ?? '').split(',').filter(Boolean);
 const b = await launch();
 const problems = [];
 const allTools = Object.keys(INFO);
-const ctx = await b.newContext({ viewport: { width: 1700, height: 1000 } });
+const ctx = await b.newContext({ locale: 'en-US', viewport: { width: 1700, height: 1000 } });
 // every tool on the tool bar, in one group (the Model workspace shows most; Arch and the sandbox have the rest)
 await ctx.addInitScript((tools) => {
   try {

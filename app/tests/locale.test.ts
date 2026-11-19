@@ -23,3 +23,8 @@ it("starts from the system locale and honors the selected language", () => {
   expect(resolveLanguage("it", "en-GB")).toBe("it");
   expect(guide("select", { selected: 3, op: null }, "it").step).toContain("3");
 });
+
+it("keeps the modifier hints for the Italian paint and eraser tools", () => {
+  expect(translate("it", "tool.paint")).toMatch(/Opzione.*campiona.*Maiusc.*stesso materiale/);
+  expect(translate("it", "tool.erase")).toMatch(/Maiusc.*Ctrl.*ammorbidimento/);
+});

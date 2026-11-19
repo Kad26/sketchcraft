@@ -19,7 +19,7 @@ const check = (ok, what) => {
 const b = await launch();
 const problems = [];
 const open = async (storage = {}) => {
-  const ctx = await b.newContext({ viewport: { width: 1280, height: 800 } });
+  const ctx = await b.newContext({ locale: 'en-US', viewport: { width: 1280, height: 800 } });
   await ctx.addInitScript((s) => {
     try {
       for (const [k, v] of Object.entries(s)) localStorage.setItem(k, v);

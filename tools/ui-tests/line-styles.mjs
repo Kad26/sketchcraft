@@ -25,7 +25,7 @@ const check = (ok, what) => {
 };
 
 const b = await launch();
-const ctx = await b.newContext({ viewport: { width: 1400, height: 900 } });
+const ctx = await b.newContext({ locale: 'en-US', viewport: { width: 1400, height: 900 } });
 const p = await ctx.newPage();
 const problems = [];
 p.on('pageerror', (e) => problems.push(String(e)));

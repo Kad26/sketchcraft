@@ -46,7 +46,7 @@ const b = await launch();
 const problems = [];
 
 // ---- comparing pictures (decoded and compared inside the browser: no image library needed) ----------------------------
-const cmpPage = await (await b.newContext()).newPage();
+const cmpPage = await (await b.newContext({ locale: 'en-US' })).newPage();
 await cmpPage.goto('about:blank');
 const compare = (a, c) =>
   cmpPage.evaluate(
@@ -103,7 +103,7 @@ const FIXED_CSS = `
 `;
 /** a new browser page with these settings saved, a small fixed model, and the camera where it starts */
 const open = async ({ layout, skin }) => {
-  const ctx = await b.newContext({ viewport: VIEWPORT, deviceScaleFactor: 1, reducedMotion: 'reduce' });
+  const ctx = await b.newContext({ locale: 'en-US', viewport: VIEWPORT, deviceScaleFactor: 1, reducedMotion: 'reduce' });
   await ctx.addInitScript(
     ([layout, skin]) => {
       try {
