@@ -1221,7 +1221,7 @@ fn component_library() {
     let g = box_group(&mut e, [0.0, 0.0, 0.0], [0.5, 0.5, 0.45], "Stool");
     let c = run(&mut e, json!({"cmd":"make_component","ids":[g],"name":"Stool"}))["component"].as_u64().unwrap();
     let saved = run(&mut e, json!({"cmd":"save_to_library","component":c,"collection":"Furniture","dir":d}))["path"].as_str().unwrap().to_string();
-    assert!(saved.ends_with("Furniture/Stool.sketchcraft"), "{saved}");
+    assert!(std::path::Path::new(&saved).ends_with("Furniture/Stool.sketchcraft"), "{saved}");
     // an OBJ dropped in with its .mtl
     let src = dir.join("src");
     std::fs::create_dir_all(&src).unwrap();
