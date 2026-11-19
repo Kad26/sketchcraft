@@ -16,7 +16,8 @@ import { LineGeometry } from "three/examples/jsm/lines/LineGeometry.js";
 import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
 import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
 import { LineSegmentsGeometry } from "three/examples/jsm/lines/LineSegmentsGeometry.js";
-import { edgePens } from "./viewport/linepens";
+import { edgePens, PX_PER_MM } from "./viewport/linepens";
+import { hatchMaterial, shaderCan, type CapHatch } from "./viewport/hatchshader";
 import { exec, type Annotation, type Reply, type Scene, type Vec3 } from "./engine";
 import { CageEditor, type CageData, type CageUi } from "./cage";
 import { CageBar } from "./cagebar";
@@ -297,6 +298,11 @@ export default function Viewport(props: Props) {
 
     let raf = 0;
     const loop = () => {
+      // put away under the Layout workspace: nothing moves, nothing is drawn, until it shows again
+      if (live.current.paused) {
+        raf = requestAnimationFrame(loop);
+        return;
+      }
       controls.update();
       const cam = t.current!.camera;
       if (live.current.styles.ao) {
@@ -846,12 +852,70 @@ export default function Viewport(props: Props) {
         // nudge toward the viewer side so the cap isn't clipped away
         const lift = plane.normal.clone().multiplyScalar(0.002);
         const shift = (a: number[]) => a.map((v, i) => v + [lift.x, lift.y, lift.z][i % 3]);
+        // the cap's fills sit a little behind in depth, so its hatch lines and outlines (in the same plane) draw over
+        // them from whichever side the cut is seen
+        const capBehind = { polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 4 };
         if (fill.length) {
           const g = new THREE.BufferGeometry();
           g.setAttribute("position", new THREE.Float32BufferAttribute(shift(fill), 3));
-          const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: 0x3a3d4a, side: THREE.DoubleSide }));
+          const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: 0x3a3d4a, side: THREE.DoubleSide, ...capBehind }));
           m.userData.sectionFill = true;
           T2.model.add(m);
+        }
+        // a tag's hatch, drawn by the hatch shader: paper white with the pattern's lines at the hatch's weight
+        for (const h of (r.hatches as CapHatch[] | undefined) ?? []) {
+          if (!h.fill.length || !shaderCan(h.families)) continue;
+          const g = new THREE.BufferGeometry();
+          g.setAttribute("position", new THREE.Float32BufferAttribute(shift(h.fill), 3));
+          const m = new THREE.Mesh(g, hatchMaterial(h, null));
+          m.userData.sectionFill = true;
+          m.userData.sectionHatchFill = true;
+          m.userData.sectionHatch = h.tag;
+          m.userData.hatchShader = true;
+          T2.model.add(m);
+        }
+        // (a pattern the shader can't take comes as lines: its cut walls on paper-white, the lines in the hatch colour)
+        const paper = (r.hatchFill as number[] | undefined) ?? [];
+        if (paper.length) {
+          const g = new THREE.BufferGeometry();
+          g.setAttribute("position", new THREE.Float32BufferAttribute(shift(paper), 3));
+          const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: 0xf6f5f0, side: THREE.DoubleSide, ...capBehind }));
+          m.userData.sectionFill = true;
+          m.userData.sectionHatchFill = true;
+          T2.model.add(m);
+        }
+        // a tag's own solid colour (a tag whose cut fill is none sends nothing: the cut stays open, outlined)
+        for (const sf of (r.solid as { tag: string; color: string; fill: number[] }[] | undefined) ?? []) {
+          if (!sf.fill.length) continue;
+          const g = new THREE.BufferGeometry();
+          g.setAttribute("position", new THREE.Float32BufferAttribute(shift(sf.fill), 3));
+          const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: new THREE.Color(sf.color), side: THREE.DoubleSide, ...capBehind }));
+          m.userData.sectionFill = true;
+          m.userData.sectionSolid = sf.tag;
+          T2.model.add(m);
+        }
+        // a tag's own cut outline: its weight as a thick line (paper mm to px, as the edges' pens)
+        const el = T2.renderer.domElement;
+        for (const ol of (r.outlines as { tag: string; weight_mm: number; color: string; lines: number[] }[] | undefined) ?? []) {
+          if (!ol.lines.length) continue;
+          const lift3 = plane.normal.clone().multiplyScalar(0.002);
+          const lg = new LineSegmentsGeometry();
+          lg.setPositions(ol.lines.map((v, i) => v + [lift3.x, lift3.y, lift3.z][i % 3]));
+          const lm = new LineMaterial({ color: new THREE.Color(ol.color), linewidth: Math.max(1, ol.weight_mm * PX_PER_MM), worldUnits: false });
+          lm.resolution.set(el.clientWidth, el.clientHeight);
+          const ls = new LineSegments2(lg, lm);
+          ls.userData.sectionOutline = ol.tag;
+          ls.userData.pen = true;
+          T2.model.add(ls);
+        }
+        const lift2 = plane.normal.clone().multiplyScalar(0.002);
+        for (const h of (r.hatch as { tag: string; color: string; lines: number[] }[] | undefined) ?? []) {
+          if (!h.lines.length) continue;
+          const g = new THREE.BufferGeometry();
+          g.setAttribute("position", new THREE.Float32BufferAttribute(h.lines.map((v, i) => v + [lift2.x, lift2.y, lift2.z][i % 3]), 3));
+          const ls = new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color: new THREE.Color(h.color || "#1a1a1f") }));
+          ls.userData.sectionHatch = h.tag;
+          T2.model.add(ls);
         }
         if (lines.length) {
           const g = new THREE.BufferGeometry();
@@ -3184,6 +3248,7 @@ export default function Viewport(props: Props) {
     }
 
     const key = (e: KeyboardEvent) => {
+      if (live.current.paused) return;
       const typing = isTypingTarget(e.target);
       if (e.code === "Space" && !typing) {
         const isDown = e.type === "keydown";

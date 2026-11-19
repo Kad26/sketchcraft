@@ -21,7 +21,7 @@
 //!   CLoop     4, then edge uses until a null
 //!   CEdgeUse  u16, edge, u8 reversed, u16 loop ref
 //!   CComponentInstance / CGroup  12-byte header, definition ref, 13 doubles
-//!             (x axis, y axis, z axis, origin, scale), name
+//!             (three basis rows, origin, scale), name
 //!
 //! Each component definition stores its entities as [u32 definition index + 1]
 //! [u16 0][u32 count][objects]; the model's own entities are a bare
@@ -56,6 +56,8 @@ enum Kind {
     AttrTexCoords,
     /// a linear dimension (CDimensionLinear) and the font it names (CSkFont)
     DimLinear,
+    /// a text label (CText): read so the list goes on, not placed
+    Text,
     Font,
     /// a class we don't decode (dimension, text...): the list parser skips it
     Unknown,
@@ -70,12 +72,14 @@ fn kind_of(name: &str) -> Option<Kind> {
         "CEdgeUse" => Kind::EdgeUse,
         "CCurve" => Kind::Curve,
         "CArcCurve" => Kind::ArcCurve,
-        "CComponentInstance" | "CGroup" => Kind::Instance,
+        // an Image is a placement of a definition that holds the picture's face, laid out like a component
+        "CComponentInstance" | "CGroup" | "CImage" => Kind::Instance,
         "CConstructionPoint" => Kind::ConstructionPoint,
         "CAttributeContainer" => Kind::AttrContainer,
         "CAttributeNamed" => Kind::AttrNamed,
         "CFaceTextureCoords" => Kind::AttrTexCoords,
         "CDimensionLinear" => Kind::DimLinear,
+        "CText" => Kind::Text,
         "CSkFont" => Kind::Font,
         _ => Kind::Unknown,
     })
@@ -107,6 +111,8 @@ enum Obj {
     Curve,
     Instance { def: Slot, m: [f64; 13] },
     Font,
+    /// a text label: found and read, not placed (`screen`: fixed to the window, not to the model)
+    Text { screen: bool, text: String },
     /// a linear dimension: where each end is, the text typed over the measured one (usually empty), and the
     /// direction and distance it is drawn offset from the measured points (inches)
     Dim { ends: [DimEnd; 2], text: String, dir: DVec3, dist: f64 },
@@ -273,6 +279,32 @@ impl<'a> Reader<'a> {
         Ok(Some(kind))
     }
 
+    /// One value of a named attribute set, its type byte already read: 4 a 32-bit integer, 6 a double,
+    /// 7 a flag byte, 10 a string, 11 an array (a u32 count, then that many values, each with its own type
+    /// byte; a Bezier curve's control points are stored this way) and 17 a point or vector (3 doubles).
+    fn attr_value(&mut self, t: u8, depth: usize) -> R<()> {
+        match t {
+            4 => self.skip(4),
+            6 => self.skip(8),
+            7 => self.skip(1),
+            10 => self.cstring().map(|_| ()),
+            17 => self.skip(24),
+            11 if depth < 4 => {
+                let n = self.u32()? as usize;
+                // every element is at least its type byte and a byte of value
+                if n > (self.d.len() - self.p) / 2 {
+                    return Err(Fail);
+                }
+                for _ in 0..n {
+                    let et = self.u8()?;
+                    self.attr_value(et, depth + 1)?;
+                }
+                Ok(())
+            }
+            _ => Err(Fail),
+        }
+    }
+
     fn attrs(&mut self) -> R<()> {
         if self.new_attr_object(&[Kind::AttrContainer])?.is_none() {
             return Ok(());
@@ -304,15 +336,8 @@ impl<'a> Reader<'a> {
                 if self.cstring()?.is_empty() {
                     break;
                 }
-                match self.u8()? {
-                    4 => self.skip(4)?,
-                    6 => self.skip(8)?,
-                    7 => self.skip(1)?,
-                    10 => {
-                        self.cstring()?;
-                    }
-                    _ => return Err(Fail),
-                }
+                let t = self.u8()?;
+                self.attr_value(t, 0)?;
             }
             self.skip(4)?;
         }
@@ -442,10 +467,7 @@ impl<'a> Reader<'a> {
                 let edge = self.obj()?;
                 let reversed = self.u8()? != 0;
                 // a plain reference: a u16, or 0x7FFF and a u32 once there are 32767+ objects
-                let loop_ref = match self.u16()? {
-                    0x7FFF => self.u32()? & 0x7FFF_FFFF,
-                    r => r as u32,
-                };
+                let loop_ref = self.plain_ref()?;
                 Obj::EdgeUse { edge, reversed, loop_ref }
             }
             Kind::ConstructionPoint => {
@@ -460,6 +482,7 @@ impl<'a> Reader<'a> {
                 self.skip(15)?;
                 Obj::Font
             }
+            Kind::Text => self.text_label()?,
             Kind::DimLinear => {
                 let start = self.p;
                 let r = self.dim_linear();
@@ -487,6 +510,60 @@ impl<'a> Reader<'a> {
         })
     }
 
+    /// CText (worked out from a SketchUp 2016 file and SketchUp 6's `screentext.skp` from testup-2): entity
+    /// header, 10 bytes, the font (an object or a reference), two doubles (where a screen text sits on the screen,
+    /// as fractions of the window; zero otherwise), an end like a dimension's (u32 kind, u32 4, a point, a vertex
+    /// reference, 10 bytes), six doubles, a short stretch of counts and flags, the text (a string) and a few zero
+    /// bytes. Kind 0 is screen text (fixed to the window: no point in the model, the end and the first three
+    /// doubles are zero); 1, 2 and 5 are seen on labels with a leader. Labels are read, not placed: no sample file
+    /// of ours shows which of the points is the leader's tip and which the text's (see #59).
+    fn text_label(&mut self) -> R<Obj> {
+        self.head()?;
+        self.skip(10)?;
+        match self.obj()? {
+            Slot::New(i) | Slot::Ref(i) if i == 0 || matches!(self.objects.get(&i), Some(Obj::Font) | None) => {}
+            Slot::Null => {}
+            _ => return Err(Fail),
+        }
+        let (sx, sy) = (self.f64()?, self.f64()?);
+        let kind = self.u32()?;
+        if kind > 16 || self.u32()? != 4 {
+            return Err(Fail);
+        }
+        self.skip(24)?;
+        self.plain_ref()?;
+        self.skip(10)?;
+        for _ in 0..6 {
+            self.coord()?;
+        }
+        // the counts and flags before the text vary; the text starts at the first string marker
+        let end = (self.p + 40).min(self.d.len());
+        let at = (self.p..end).find(|&i| self.d.get(i..i + 3) == Some(b"\xff\xfe\xff")).ok_or(Fail)?;
+        self.p = at;
+        let mut text = self.cstring()?;
+        if text.chars().count() > 2000 {
+            text = text.chars().take(2000).collect();
+        }
+        // a screen text is placed by its spot on the screen
+        let screen = kind == 0 && sx.is_finite() && sy.is_finite();
+        // the closing zero bytes
+        for _ in 0..5 {
+            if self.d.get(self.p) != Some(&0) {
+                break;
+            }
+            self.p += 1;
+        }
+        Ok(Obj::Text { screen, text })
+    }
+
+    /// A plain reference: a u16, or 0x7FFF and a u32 once there are 32767+ objects.
+    fn plain_ref(&mut self) -> R<u32> {
+        Ok(match self.u16()? {
+            0x7FFF => self.u32()? & 0x7FFF_FFFF,
+            r => r as u32,
+        })
+    }
+
     /// A finite coordinate of a sane size (inches).
     fn coord(&mut self) -> R<f64> {
         let v = self.f64()?;
@@ -496,7 +573,7 @@ impl<'a> Reader<'a> {
     /// CDimensionLinear (worked out from SketchUp 7 files):
     ///   entity header, 10 bytes, the typed text (a string; empty = show the measured length), the font (an object
     ///   or a reference), a zero byte, u32 3,
-    ///   two ends of 44 bytes each [u32 2, u32 4, a point (3 doubles, zero when attached), u32 vertex reference, 8 bytes],
+    ///   two ends of 44 bytes each [u32 2, u32 4, a point (3 doubles, zero when attached), a vertex reference (u16, or 0x7FFF and a u32 in big files), 10 bytes],
     ///   six doubles (the offset direction, then the plane's), u32 2, the offset distance (a double),
     ///   a few zero bytes, u32 3.
     fn dim_linear(&mut self) -> R<Obj> {
@@ -522,8 +599,8 @@ impl<'a> Reader<'a> {
             }
             self.u32()?;
             let p = DVec3::new(self.coord()?, self.coord()?, self.coord()?);
-            let v = self.u32()?;
-            self.skip(8)?;
+            let v = self.plain_ref()?;
+            self.skip(10)?;
             *e = if v == 0 { DimEnd::Free(p) } else { DimEnd::Vertex(v) };
         }
         let mut f = [0.0; 6];
@@ -588,7 +665,7 @@ impl<'a> Reader<'a> {
                         }
                     }
                 }
-                Obj::Instance { .. } | Obj::Dim { .. } => items += 1,
+                Obj::Instance { .. } | Obj::Dim { .. } | Obj::Text { .. } => items += 1,
                 _ => {}
             }
         }
@@ -606,6 +683,16 @@ pub struct Entities {
     pub dims: Vec<SkpDim>,
     /// dimension records the file had that couldn't be placed (an end on a vertex that isn't in this list)
     pub dims_skipped: usize,
+    /// text labels the file had (read, not placed; at most `MAX_DIMS`)
+    pub texts: Vec<SkpText>,
+}
+
+/// A text label as the file has it. Not placed in the model (see `Reader::text_label`).
+#[derive(Debug, Clone)]
+pub struct SkpText {
+    /// screen text: fixed to the window, with no point in the model
+    pub screen: bool,
+    pub text: String,
 }
 
 /// A linear dimension as the file has it: the two points it measures, and where its line is drawn.
@@ -678,6 +765,11 @@ fn resolve(r: &Reader, items: &[Slot]) -> Entities {
                     out.faces.push(SkpFace { outer, holes: rings, material: *material });
                 }
             }
+            Some(Obj::Text { screen, text }) => {
+                if out.texts.len() < MAX_DIMS {
+                    out.texts.push(SkpText { screen: *screen, text: text.clone() });
+                }
+            }
             Some(Obj::Dim { ends, text, dir, dist }) => {
                 let at = |e: &DimEnd| match e {
                     DimEnd::Free(p) => Some(*p),
@@ -696,10 +788,13 @@ fn resolve(r: &Reader, items: &[Slot]) -> Entities {
             }
             Some(Obj::Instance { def, m }) => {
                 if let Some(d) = def.index() {
+                    // The file stores the basis as three rows (checked on a 2016 file: read as columns, a
+                    // rotated part's corners touch its neighbours' 57 times in 4,538, as rows 1,066 times);
+                    // glam takes columns, the same fix #71 made in the modern reader.
                     let t = DMat4::from_cols(
-                        DVec4::new(m[0], m[1], m[2], 0.0),
-                        DVec4::new(m[3], m[4], m[5], 0.0),
-                        DVec4::new(m[6], m[7], m[8], 0.0),
+                        DVec4::new(m[0], m[3], m[6], 0.0),
+                        DVec4::new(m[1], m[4], m[7], 0.0),
+                        DVec4::new(m[2], m[5], m[8], 0.0),
                         DVec4::new(m[9], m[10], m[11], if m[12].abs() > 1e-12 { m[12] } else { 1.0 }),
                     );
                     out.instances.push((d, t));
@@ -954,7 +1049,7 @@ fn parse_items<'a>(mut r: Reader<'a>, n: usize, budget: usize, tries: &mut usize
                     let t = u16::from_le_bytes([d[q], d[q + 1]]);
                     if t == 0xFFFF {
                         let nl = d.get(q + 4..q + 6).map(|b| u16::from_le_bytes([b[0], b[1]]) as usize).unwrap_or(0);
-                        return d.get(q + 6..q + 6 + nl).map_or(false, |nm| matches!(nm, b"CEdge" | b"CFace" | b"CComponentInstance" | b"CGroup" | b"CConstructionPoint"));
+                        return d.get(q + 6..q + 6 + nl).map_or(false, |nm| matches!(nm, b"CEdge" | b"CFace" | b"CComponentInstance" | b"CGroup" | b"CImage" | b"CConstructionPoint"));
                     }
                     if t & 0x8000 != 0 {
                         return matches!(classes.get(&((t & 0x7FFF) as u32)), Some(Kind::Edge | Kind::Face | Kind::Instance | Kind::ConstructionPoint));
@@ -1039,7 +1134,7 @@ pub fn parse(d: &[u8]) -> Result<SkpFile> {
     let geometry_tag = |known: &HashMap<u32, Kind>, t: u16, i: usize| -> bool {
         if t == 0xFFFF {
             let n = d.get(i + 4..i + 6).map(|b| u16::from_le_bytes([b[0], b[1]]) as usize).unwrap_or(0);
-            return d.get(i + 6..i + 6 + n).map_or(false, |name| matches!(name, b"CEdge" | b"CFace" | b"CComponentInstance" | b"CGroup"));
+            return d.get(i + 6..i + 6 + n).map_or(false, |name| matches!(name, b"CEdge" | b"CFace" | b"CComponentInstance" | b"CGroup" | b"CImage"));
         }
         t & 0x8000 != 0 && matches!(known.get(&((t & 0x7FFF) as u32)), Some(Kind::Edge | Kind::Face | Kind::Instance))
     };
@@ -1164,6 +1259,27 @@ pub fn parse(d: &[u8]) -> Result<SkpFile> {
         bail!("this SketchUp file looks damaged: SketchCraft couldn't make sense of its contents");
     }
     if file.definitions.is_empty() && file.roots.is_empty() {
+        // a model with no geometry at all may still hold annotations (SketchUp's own `screentext.skp` is one screen
+        // text): its own list then starts by declaring the annotation's class. Only looked for when nothing else was
+        // found, so a definition's list that starts with a text can never be taken for the model's own.
+        let annotation_tag = |i: usize| -> bool {
+            let n = d.get(i + 4..i + 6).map(|b| u16::from_le_bytes([b[0], b[1]]) as usize).unwrap_or(0);
+            d.get(i..i + 2) == Some(&[0xFF, 0xFF]) && d.get(i + 6..i + 6 + n).is_some_and(|name| matches!(name, b"CText" | b"CDimensionLinear"))
+        };
+        let mut i = 0x100;
+        while i + 12 < d.len() && file.roots.len() < 16 && !gave_up() && !out_of_time() {
+            let n = u32::from_le_bytes(d[i..i + 4].try_into().unwrap());
+            if (1..=10_000).contains(&n) && annotation_tag(i + 4) {
+                if let Some((r, items, _)) = try_bases(&known, i + 4, n, &mut (1..8192)) {
+                    file.roots.push(resolve(&r, &items));
+                    i = r.p.max(i + 1);
+                    continue;
+                }
+            }
+            i += 1;
+        }
+    }
+    if file.definitions.is_empty() && file.roots.is_empty() {
         bail!("no geometry found in this SketchUp file");
     }
     // A placement names its definition's object index. The list header only says
@@ -1241,6 +1357,7 @@ pub fn import(m: &mut Model, d: &[u8], at: DVec3, name: &str) -> Result<ImportSu
     let base = DMat4::from_translation(at);
     let mut placed = 0;
     let mut root_faces = 0;
+    let mut attach_budget = ATTACH_WORK;
     for root in &file.roots {
         let mut tmp = Model::default();
         let n = fill(&mut tmp, root, &file);
@@ -1248,14 +1365,37 @@ pub fn import(m: &mut Model, d: &[u8], at: DVec3, name: &str) -> Result<ImportSu
         summary.faces += n;
         merge_into(m, &tmp, gid, base);
         let to_world = |p: DVec3| at + p * INCH;
-        summary.skipped_annotations += root.dims_skipped;
+        summary.skipped_annotations += root.dims_skipped + root.texts.len();
+        for t in &root.texts {
+            summary.screen_texts += t.screen as usize;
+            if summary.skipped_labels.len() < MAX_LISTED_LABELS {
+                summary.skipped_labels.push(t.text.chars().take(200).collect());
+            }
+        }
+        // what one attempt to attach an end costs (a walk over the vertices, then the edges)
+        let cost = 2 * geometry_size(m) + 1;
         for dim in &root.dims {
             let (a, b, off) = (to_world(dim.a), to_world(dim.b), dim.offset * INCH);
             if !(a.is_finite() && b.is_finite() && off.is_finite()) {
                 continue;
             }
+            // each end attaches to the geometry it sits on (a vertex, else a point along an edge), so the
+            // dimension follows edits; an end with nothing there, or past the work budget, keeps its point
+            let mut attach = |p: DVec3| -> Option<crate::drafting::Anchor> {
+                if attach_budget < cost {
+                    return None;
+                }
+                attach_budget -= cost;
+                m.anchor_near(p, ATTACH_TOL)
+            };
+            let anchors = [attach(a), attach(b)];
+            if anchors.iter().all(Option::is_some) {
+                summary.dimensions_attached += 1;
+            } else {
+                summary.dimensions_unattached += 1;
+            }
             let id = m.new_id();
-            m.annotations.push(Annotation::Dimension { id, a, b, offset: off });
+            m.annotations.push(Annotation::Dimension { id, a, b, offset: off, anchors: Box::new(anchors) });
             summary.dimensions += 1;
             if !dim.text.is_empty() {
                 let id = m.new_id();
@@ -1299,8 +1439,30 @@ pub struct ImportSummary {
     /// dimensions and text labels made from the file's annotations
     pub dimensions: usize,
     pub labels: usize,
-    /// annotation records found but not imported (not attached to anything we read)
+    /// annotation records found but not imported (not attached to anything we read; text labels)
     pub skipped_annotations: usize,
+    /// imported dimensions with both ends attached to the imported geometry, and the rest (an end on nothing within
+    /// `ATTACH_TOL`, or past the work budget), which keep fixed points
+    pub dimensions_attached: usize,
+    pub dimensions_unattached: usize,
+    /// of the skipped annotations, screen texts (fixed to the window, so with no place in the model)
+    pub screen_texts: usize,
+    /// the words of the text labels left out (the first `MAX_LISTED_LABELS`), so they can be added by hand
+    pub skipped_labels: Vec<String>,
+}
+
+/// How near (metres) a dimension's end must be to a vertex or an edge to attach to it: SketchUp's own tolerance,
+/// a thousandth of an inch.
+pub const ATTACH_TOL: f64 = 0.001 * INCH;
+/// The most work (vertices and edges looked at) attaching one file's dimensions may take; the ends past it stay free.
+const ATTACH_WORK: usize = 50_000_000;
+/// Skipped labels listed by their words in the summary.
+const MAX_LISTED_LABELS: usize = 50;
+
+/// About how many vertices and edges `Model::anchor_near` looks at: the model's own and each placed definition's.
+fn geometry_size(m: &Model) -> usize {
+    let own = m.vertices.len() + m.edges.len();
+    m.instances.values().fold(own, |n, i| n.saturating_add(m.definitions.get(&i.def).map_or(0, |d| d.model.vertices.len() + d.model.edges.len())))
 }
 
 /// Add faces and loose lines (inches -> meters) to a model, in bulk.

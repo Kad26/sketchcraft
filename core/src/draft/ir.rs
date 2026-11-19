@@ -60,15 +60,45 @@ pub struct Pens {
     /// the sheet border
     pub border: f64,
     pub blueprint: bool,
+    /// where generated hatches are kept between drawings (the engine's `Drawings`); None: worked out each time
+    pub hatches: Option<std::sync::Arc<super::cache::HatchCache>>,
+    /// the model's world faces, edges and triangles, worked out once for every drawing that shares these pens (a
+    /// sheet set, a page, the kept drawings between changes); None: each drawing works them out
+    pub world: Option<std::sync::Arc<super::cache::World>>,
 }
 
 impl Pens {
     pub fn new(blueprint: bool) -> Self {
         if blueprint {
-            Pens { ink: BP_INK, paper: BP_PAPER, cut_fill: BP_CUT, hair: 0.13, thin: 0.18, medium: 0.25, heavy: 0.35, border: 0.5, blueprint }
+            Pens { ink: BP_INK, paper: BP_PAPER, cut_fill: BP_CUT, hair: 0.13, thin: 0.18, medium: 0.25, heavy: 0.35, border: 0.5, blueprint, hatches: None, world: None }
         } else {
-            Pens { ink: BLACK, paper: WHITE, cut_fill: [41, 43, 51], hair: 0.13, thin: 0.18, medium: 0.25, heavy: 0.35, border: 0.5, blueprint }
+            Pens { ink: BLACK, paper: WHITE, cut_fill: [41, 43, 51], hair: 0.13, thin: 0.18, medium: 0.25, heavy: 0.35, border: 0.5, blueprint, hatches: None, world: None }
         }
+    }
+    /// `m.world_faces()`, shared when these pens carry the world
+    pub fn with_faces<R>(&self, m: &crate::model::Model, f: impl FnOnce(&[crate::components::WFace]) -> R) -> R {
+        match &self.world {
+            Some(w) => f(w.faces(m)),
+            None => f(&m.world_faces()),
+        }
+    }
+    /// `m.world_edges()`, shared the same way
+    pub fn with_edges<R>(&self, m: &crate::model::Model, f: impl FnOnce(&[crate::components::WEdge]) -> R) -> R {
+        match &self.world {
+            Some(w) => f(w.edges(m)),
+            None => f(&m.world_edges()),
+        }
+    }
+    /// the faces of `m.world_faces()` triangulated (faces with no normal left out), shared the same way
+    pub fn with_tris<R>(&self, m: &crate::model::Model, f: impl FnOnce(&[[glam::DVec3; 3]]) -> R) -> R {
+        match &self.world {
+            Some(w) => f(w.tris(m)),
+            None => f(&super::cache::World::triangles(&m.world_faces())),
+        }
+    }
+    /// `m.section(..)` from the shared faces
+    pub fn section(&self, m: &crate::model::Model, origin: glam::DVec3, normal: glam::DVec3) -> anyhow::Result<crate::section::Cut> {
+        self.with_faces(m, |fs| m.section_of(fs, origin, normal, &m.drafting))
     }
     /// a lighter ink for what lies below the cut
     pub fn faint(&self) -> Rgb {
@@ -114,6 +144,18 @@ impl Pens {
                 pen.dash = dash;
             }
         }
+        pen
+    }
+
+    /// The pen of a cut outline (plans and sections) for a region on `tag`: the heavy pen, at the tag's
+    /// `cut.outline_mm` when it has one, in the tag's line colour when it has one. Continuous whatever the tag's line
+    /// style is (a cut is never dashed). Goes through `for_tag`, so the colour rules are the lines' own.
+    pub fn for_cut(&self, d: &crate::drafting::Drafting, tag: Option<&str>) -> Pen {
+        let base = self.ink(self.heavy);
+        let Some(t) = tag.and_then(|t| d.tag_style(t)) else { return base };
+        let mut pen = self.for_tag(d, tag, None, base.clone(), false);
+        pen.dash = base.dash;
+        pen.w = if t.cut.outline_mm > 0.0 && t.cut.outline_mm.is_finite() { t.cut.outline_mm } else { self.heavy };
         pen
     }
 }
@@ -180,8 +222,9 @@ pub enum Role {
     Caption,
     /// a heading inside the notes
     Heading3,
-    /// a table cell: its row and column, and whether it heads them
-    Cell { row: u16, col: u16, header: bool },
+    /// a table cell: which table on the page, its row and column, and whether it heads them (a cell's text may be
+    /// several runs, one per line: they are one cell)
+    Cell { table: u16, row: u16, col: u16, header: bool },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -211,7 +254,178 @@ pub struct Group {
     pub clip: Option<[f64; 4]>,
     /// a drawing or picture (a viewport) with its description, as a figure in a tagged PDF; None: decoration
     pub alt: Option<String>,
-    pub children: Vec<Prim>,
+    /// 0 to 1, how much of the group shows (1: all of it). Drawn as one transparency group, so lines
+    /// overlapping inside it don't darken each other.
+    pub opacity: f64,
+    /// shared: a kept drawing placed on a page is not copied
+    pub children: Arc<Vec<Prim>>,
+}
+
+/// A hatched region (design §3.3). PDF and SVG clip to `rings` and draw `lines`; DXF writes a native `HATCH`
+/// from `rings` and `families`, so it stays a hatch in CAD. When the pattern was too dense or missing, `lines` is
+/// empty and `tint` fills the region instead, with `note` saying why (the export lists it as a warning).
+#[derive(Clone, Debug, PartialEq)]
+pub struct HatchPrim {
+    /// the outer ring and its holes, paper mm, y down (even-odd)
+    pub rings: Vec<Vec<[f64; 2]>>,
+    /// the pattern's name
+    pub name: String,
+    /// the pattern placed, in paper mm with y up from the page's bottom left (the DXF's frame)
+    pub families: Vec<super::hatch::Placed>,
+    /// the angle and scale it was placed with (degrees; paper mm per pattern mm)
+    pub angle: f64,
+    pub scale: f64,
+    pub pen: Pen,
+    /// the lines, clipped to the region and dashed, paper mm, y down (a dot is a zero-length line)
+    pub lines: Vec<[[f64; 2]; 2]>,
+    pub tint: Option<Rgb>,
+    pub note: Option<String>,
+}
+
+impl HatchPrim {
+    /// The region's outline as a path (each ring closed).
+    pub fn ring_segs(&self) -> Vec<Seg> {
+        let mut segs = Vec::new();
+        for r in self.rings.iter().filter(|r| r.len() >= 3) {
+            for (i, p) in r.iter().enumerate() {
+                segs.push(if i == 0 { Seg::M(*p) } else { Seg::L(*p) });
+            }
+            segs.push(Seg::Z);
+        }
+        segs
+    }
+}
+
+/// Plain lines kept compactly: a run of `PathPrim`s that are each one straight segment (`M` then `L`), stroked and
+/// not filled, stored as flat arrays (their ends, a pen index, provenance apart) in a fraction of the memory.
+/// Purely a storage form: `path(i)` gives back each line exactly as it was made, and every writer reads them
+/// through `expanded`, so a drawing writes the same bytes either way. Viewport drawings are packed this way
+/// (`Cv::clipped`), and that is what the kept drawings hold (design §4, memory).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Lines {
+    /// each line's two ends, paper mm, y down
+    pub ends: Vec<[[f64; 2]; 2]>,
+    /// each line's pen: an index into `pens`
+    pub pen: Vec<u16>,
+    pub pens: Vec<Pen>,
+    /// each line's provenance (an index into `edges` and its span; `NO_EDGE`: none), or empty when no line has one
+    pub prov: Vec<(u32, [f32; 2])>,
+    pub edges: Vec<Arc<EdgeRef>>,
+}
+
+/// `Lines::prov` of a line with no provenance.
+pub const NO_EDGE: u32 = u32::MAX;
+/// Runs shorter than this stay as paths (packing them saves nothing worth the indirection).
+const PACK_MIN: usize = 8;
+
+impl Lines {
+    pub fn len(&self) -> usize {
+        self.ends.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.ends.is_empty()
+    }
+    /// Line `i` as the path it was made from.
+    pub fn path(&self, i: usize) -> PathPrim {
+        let [a, b] = self.ends[i];
+        let prov = self.prov.get(i).filter(|(e, _)| *e != NO_EDGE).map(|(e, t)| Prov { edge: self.edges[*e as usize].clone(), t: *t });
+        PathPrim { segs: vec![Seg::M(a), Seg::L(b)], pen: Some(self.pens[self.pen[i] as usize].clone()), fill: None, prov }
+    }
+    /// Can `p` be packed (one straight stroked segment, no fill)?
+    fn takes(p: &PathPrim) -> bool {
+        p.fill.is_none() && p.pen.is_some() && matches!(p.segs[..], [Seg::M(_), Seg::L(_)])
+    }
+    /// Add `p` (one that `takes`); given back when a table is full.
+    fn push(&mut self, p: PathPrim) -> Result<(), PathPrim> {
+        let (Some(pen), [Seg::M(a), Seg::L(b)]) = (&p.pen, &p.segs[..]) else { return Err(p) };
+        let k = match self.pens.iter().rposition(|q| q == pen) {
+            Some(k) => k,
+            None if self.pens.len() < u16::MAX as usize => {
+                self.pens.push(pen.clone());
+                self.pens.len() - 1
+            }
+            None => return Err(p),
+        };
+        if let Some(pv) = &p.prov {
+            let e = match self.edges.last() {
+                Some(last) if Arc::ptr_eq(last, &pv.edge) => self.edges.len() - 1,
+                _ if self.edges.len() >= NO_EDGE as usize => return Err(p),
+                _ => {
+                    self.edges.push(pv.edge.clone());
+                    self.edges.len() - 1
+                }
+            };
+            if self.prov.is_empty() {
+                self.prov = vec![(NO_EDGE, [0.0; 2]); self.ends.len()];
+            }
+            self.prov.push((e as u32, pv.t));
+        } else if !self.prov.is_empty() {
+            self.prov.push((NO_EDGE, [0.0; 2]));
+        }
+        self.ends.push([*a, *b]);
+        self.pen.push(k as u16);
+        Ok(())
+    }
+    /// Estimated bytes held.
+    pub fn bytes(&self) -> usize {
+        120 + self.ends.capacity() * 32
+            + self.pen.capacity() * 2
+            + self.prov.capacity() * 12
+            + self.pens.iter().map(|p| 40 + p.dash.len() * 8).sum::<usize>()
+            + self.edges.iter().map(|e| 8 + (64 + e.path.len() * 8) / Arc::strong_count(e).max(1)).sum::<usize>()
+    }
+}
+
+/// `items` with every `Prim::Lines` opened into its paths, in place (borrowed when there is none): what the
+/// writers draw, so packed and unpacked drawings write exactly the same.
+pub fn expanded(items: &[Prim]) -> std::borrow::Cow<'_, [Prim]> {
+    if !items.iter().any(|p| matches!(p, Prim::Lines(_))) {
+        return std::borrow::Cow::Borrowed(items);
+    }
+    let mut out = Vec::with_capacity(items.len());
+    for p in items {
+        match p {
+            Prim::Lines(l) => out.extend((0..l.len()).map(|i| Prim::Path(l.path(i)))),
+            other => out.push(other.clone()),
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
+/// Pack runs of plain lines (`Lines::takes`) of at least `PACK_MIN` into `Prim::Lines`, keeping the order.
+pub fn pack(items: Vec<Prim>) -> Vec<Prim> {
+    fn flush(run: &mut Vec<PathPrim>, out: &mut Vec<Prim>) {
+        if run.len() < PACK_MIN {
+            out.extend(run.drain(..).map(Prim::Path));
+            return;
+        }
+        let mut l = Lines { ends: Vec::with_capacity(run.len()), pen: Vec::with_capacity(run.len()), ..Default::default() };
+        for p in run.drain(..) {
+            if let Err(p) = l.push(p) {
+                // a table is full: start another
+                out.push(Prim::Lines(std::mem::take(&mut l)));
+                let _ = l.push(p);
+            }
+        }
+        l.ends.shrink_to_fit();
+        l.pen.shrink_to_fit();
+        l.prov.shrink_to_fit();
+        out.push(Prim::Lines(l));
+    }
+    let mut out: Vec<Prim> = Vec::new();
+    let mut run: Vec<PathPrim> = Vec::new();
+    for p in items {
+        match p {
+            Prim::Path(pp) if Lines::takes(&pp) => run.push(pp),
+            other => {
+                flush(&mut run, &mut out);
+                out.push(other);
+            }
+        }
+    }
+    flush(&mut run, &mut out);
+    out.shrink_to_fit();
+    out
 }
 
 #[derive(Clone, Debug)]
@@ -220,6 +434,9 @@ pub enum Prim {
     Text(TextPrim),
     Image(ImagePrim),
     Group(Group),
+    Hatch(HatchPrim),
+    /// plain lines, packed (see `Lines`)
+    Lines(Lines),
 }
 
 impl PartialEq for Prim {
@@ -228,7 +445,9 @@ impl PartialEq for Prim {
             (Prim::Path(a), Prim::Path(b)) => a == b,
             (Prim::Text(a), Prim::Text(b)) => a == b,
             (Prim::Image(a), Prim::Image(b)) => a.rect == b.rect && a.rgb.as_raw() == b.rgb.as_raw(),
-            (Prim::Group(a), Prim::Group(b)) => a.clip == b.clip && a.alt == b.alt && a.children == b.children,
+            (Prim::Group(a), Prim::Group(b)) => a.clip == b.clip && a.alt == b.alt && a.opacity == b.opacity && a.children == b.children,
+            (Prim::Hatch(a), Prim::Hatch(b)) => a == b,
+            (Prim::Lines(a), Prim::Lines(b)) => a == b,
             _ => false,
         }
     }
@@ -250,9 +469,29 @@ impl Page {
     pub fn new(w: f64, h: f64) -> Self {
         Page { w, h, bg: None, title: String::new(), items: Vec::new() }
     }
-    /// Every primitive, groups opened.
-    pub fn walk<'a>(&'a self, f: &mut dyn FnMut(&'a Prim)) {
-        fn go<'a>(items: &'a [Prim], f: &mut dyn FnMut(&'a Prim)) {
+    /// Every primitive, groups opened and packed lines (`Prim::Lines`) as their paths.
+    pub fn walk(&self, f: &mut dyn FnMut(&Prim)) {
+        fn go(items: &[Prim], f: &mut dyn FnMut(&Prim)) {
+            for p in items {
+                match p {
+                    Prim::Group(g) => {
+                        f(p);
+                        go(&g.children, f);
+                    }
+                    Prim::Lines(l) => {
+                        for i in 0..l.len() {
+                            f(&Prim::Path(l.path(i)));
+                        }
+                    }
+                    _ => f(p),
+                }
+            }
+        }
+        go(&self.items, f);
+    }
+    /// Every primitive, groups opened, packed lines left packed (cheaper than `walk` over a whole set).
+    pub fn visit(&self, f: &mut dyn FnMut(&Prim)) {
+        fn go(items: &[Prim], f: &mut dyn FnMut(&Prim)) {
             for p in items {
                 f(p);
                 if let Prim::Group(g) = p {
@@ -265,7 +504,7 @@ impl Page {
     /// All the text on the page, one string per run.
     pub fn texts(&self) -> Vec<String> {
         let mut out = Vec::new();
-        self.walk(&mut |p| {
+        self.visit(&mut |p| {
             if let Prim::Text(t) = p {
                 out.push(t.text.clone());
             }
@@ -360,8 +599,8 @@ impl Cv {
         let mut inner = Cv::new(self.h_mm);
         f(&mut inner);
         let rect = [top_left[0], top_left[1], w / PT, h / PT];
-        let children = cull(inner.out, &rect);
-        self.out.push(Prim::Group(Group { clip: Some(rect), alt: None, children }));
+        let children = pack(cull(inner.out, &rect));
+        self.out.push(Prim::Group(Group { clip: Some(rect), alt: None, opacity: 1.0, children: Arc::new(children) }));
     }
 }
 
@@ -408,6 +647,17 @@ pub fn cull(items: Vec<Prim>, rect: &[f64; 4]) -> Vec<Prim> {
                     }
                 }
                 Some(Prim::Path(pp))
+            }
+            Prim::Hatch(h) => {
+                let mut lo = [f64::MAX; 2];
+                let mut hi = [f64::MIN; 2];
+                for p in h.rings.iter().flatten() {
+                    for i in 0..2 {
+                        lo[i] = lo[i].min(p[i]);
+                        hi[i] = hi[i].max(p[i]);
+                    }
+                }
+                (lo[0] <= hi[0] && !(hi[0] < x0 || lo[0] > x1 || hi[1] < y0 || lo[1] > y1)).then_some(Prim::Hatch(h))
             }
             Prim::Text(t) => {
                 let reach = t.size * t.text.chars().count() as f64;

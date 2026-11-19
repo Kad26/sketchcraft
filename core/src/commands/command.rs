@@ -205,8 +205,37 @@ pub enum Command {
         line: Option<String>,
         #[serde(default)]
         color: Option<String>,
+        /// the hatch the tag's cut surfaces get in plans and sections: `{pattern, color?, weight_mm?, scale?, angle?,
+        /// scale_mode?: paper|model}`; only what is given changes; `{"pattern": ""}` removes it
+        #[serde(default)]
+        hatch: Option<HatchArgs>,
+        /// how the tag's cut surfaces are filled and outlined in plans and sections (sheets and the on-screen
+        /// section): `{fill?: auto|solid|hatch|none, color? ("#rrggbb" for solid; "" clears), outline_mm? (0.05 to 2;
+        /// 0 clears), priority? (0 to 999: the higher tag wins where cuts overlap)}`; only what is given changes
+        #[serde(default)]
+        cut: Option<CutArgs>,
         #[serde(default)]
         clear: bool,
+    },
+    /// Keep a hatch pattern in the model (`.pat` text, AutoCAD format) under `name`, so tag hatches can use it.
+    /// `text` may hold several patterns: the one called `name` is taken (or the only one). `units` is what a file
+    /// that doesn't say means (`mm` or `inch`; AutoCAD's own set is in inches). `delete: true` removes it.
+    HatchPattern {
+        name: String,
+        #[serde(default)]
+        text: String,
+        #[serde(default)]
+        units: Option<String>,
+        #[serde(default)]
+        delete: bool,
+    },
+    /// Read-only: every hatch pattern a tag can use (built-in and in the model), with its lines; with `text`, the
+    /// patterns in that `.pat` text instead (nothing is kept), and what in it couldn't be read.
+    HatchPatterns {
+        #[serde(default)]
+        text: Option<String>,
+        #[serde(default)]
+        units: Option<String>,
     },
     /// The same for single edges (`ids`: edges, or faces for all their edges); an edge's own style beats its tag's.
     /// `clear: true` removes the edges' own style.
@@ -437,6 +466,149 @@ pub enum Command {
         #[serde(default)]
         tol: Option<f64>,
     },
+    /// Paper line work on a sheet (drawn in the PDF, SVG and DXF). `kind` is `line` (2 points), `polyline` (2 or more),
+    /// `arc` (3 points: start, a point on it, end) or `rect` (2 opposite corners); default: a line for 2 points, else a
+    /// polyline. Points are paper millimetres from the sheet's top left. `w_mm` (0.05 to 2, default 0.25), `color`
+    /// ("#rrggbb"; default the sheet's ink) and `dash_mm` (on, off, ...) make the pen. `lines: [..]` adds several as
+    /// one step. With `id`, changes that item instead (only what is given; its kind stays). Delete with `sheet_item_delete`.
+    SheetLine {
+        #[serde(flatten)]
+        args: LineArgs,
+        #[serde(default)]
+        lines: Vec<LineArgs>,
+    },
+    /// Paper text on a sheet: `text` (lines split on newlines) with its first line's baseline starting at `at_mm`
+    /// (paper mm from the sheet's top left), `height_mm` tall (1 to 50, default 3.5). `width_mm` makes it a text
+    /// block: each line of `text` is a paragraph, wrapped to that width (0 makes it plain text again). `align`:
+    /// left, center or right (across the block, or about `at_mm` for plain text). With `id`, changes that text
+    /// instead (only what is given). Delete with `sheet_item_delete`.
+    SheetText {
+        #[serde(default)]
+        id: Option<Id>,
+        #[serde(default)]
+        sheet: Option<Id>,
+        #[serde(default)]
+        at_mm: Option<[f64; 2]>,
+        #[serde(default)]
+        text: Option<String>,
+        #[serde(default)]
+        height_mm: Option<f64>,
+        #[serde(default)]
+        width_mm: Option<f64>,
+        #[serde(default)]
+        align: Option<crate::drafting::Align>,
+        #[serde(default)]
+        z: Option<i32>,
+    },
+    /// A table on a sheet (a door schedule, a drawing index). New: `sheet`, `at_mm` (its top left, paper mm) and
+    /// `rows` (cell text; a newline in a cell starts a new line in it) or `size: [rows, cols]` (an empty grid). With
+    /// `id`, changes that table (only what is given), in this order: `insert_rows`/`delete_rows`/`insert_cols`/
+    /// `delete_cols` (`{at, n}`), then `rows` (all of it), then `cells` (`[{row, col, text}]`; the table grows to
+    /// hold them). `cols_mm`: each column's width (0: fit its text). `header_rows` (default 1), `header_cols`
+    /// (default 0), `title`, `text_mm` (letter height, default 2.5), `border` (grid, rules, outer or none),
+    /// `align` (per column: left, center, right), `source: "sheets"` (a drawing index: filled from the document's
+    /// sheets, kept up to date; `""` unlinks it), `z`. One undo step.
+    SheetTable {
+        #[serde(default)]
+        id: Option<Id>,
+        #[serde(default)]
+        sheet: Option<Id>,
+        #[serde(default)]
+        at_mm: Option<[f64; 2]>,
+        #[serde(default)]
+        rows: Option<Vec<Vec<String>>>,
+        #[serde(default)]
+        size: Option<[usize; 2]>,
+        #[serde(default)]
+        cells: Vec<CellArg>,
+        #[serde(default)]
+        insert_rows: Option<SpanArg>,
+        #[serde(default)]
+        delete_rows: Option<SpanArg>,
+        #[serde(default)]
+        insert_cols: Option<SpanArg>,
+        #[serde(default)]
+        delete_cols: Option<SpanArg>,
+        #[serde(default)]
+        cols_mm: Option<Vec<f64>>,
+        #[serde(default)]
+        header_rows: Option<u32>,
+        #[serde(default)]
+        header_cols: Option<u32>,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        text_mm: Option<f64>,
+        #[serde(default)]
+        border: Option<crate::drafting::Border>,
+        #[serde(default)]
+        align: Option<Vec<crate::drafting::Align>>,
+        #[serde(default)]
+        source: Option<String>,
+        #[serde(default)]
+        z: Option<i32>,
+    },
+    /// Paste a grid copied from a spreadsheet: `text` is tab-separated (what spreadsheets copy) or comma-separated
+    /// (CSV, quotes allowed); `format`: auto (default), tsv, csv or ssv (semicolons). With `id`, writes into that
+    /// table from the cell `at: [row, col]` (default [0, 0]), growing it as needed; else a new table on `sheet` at
+    /// `at_mm`, its first `header_rows` (default 1) the header. One undo step.
+    SheetTablePaste {
+        #[serde(default)]
+        id: Option<Id>,
+        #[serde(default)]
+        sheet: Option<Id>,
+        #[serde(default)]
+        at_mm: Option<[f64; 2]>,
+        text: String,
+        #[serde(default)]
+        format: Option<String>,
+        #[serde(default)]
+        at: Option<[usize; 2]>,
+        #[serde(default)]
+        header_rows: Option<u32>,
+    },
+    /// Trim paper line work: cut away the span of `item` that holds `at_mm` (the point you pick on it), between the
+    /// nearest places other things cross it. Boundaries are the other paper line work on the sheet, the lines the
+    /// sheet's viewports draw of the model (never trimmed themselves), and viewport frames. A span in the middle
+    /// leaves two pieces (the second is a new item); one at the end leaves one. With no crossing the command refuses.
+    /// `pick_tol_mm` (default 2) is how far `at_mm` may be from the line work. `use_model: false` ignores the model's lines.
+    SheetTrim {
+        item: Id,
+        at_mm: [f64; 2],
+        #[serde(default)]
+        pick_tol_mm: Option<f64>,
+        #[serde(default)]
+        use_model: Option<bool>,
+        /// work out what it would do (the reply's `cut` / `to`) and change nothing: a hover preview, read-only
+        #[serde(default)]
+        preview: bool,
+    },
+    /// Extend paper line work: the end of `item` nearest `at_mm` runs on, along its own direction (an arc along its
+    /// circle), to the nearest boundary ahead of it: other line work, a model line a viewport draws, or a viewport
+    /// frame. Refuses when nothing lies ahead, and for closed shapes.
+    SheetExtend {
+        item: Id,
+        at_mm: [f64; 2],
+        #[serde(default)]
+        pick_tol_mm: Option<f64>,
+        #[serde(default)]
+        use_model: Option<bool>,
+        /// work out what it would do (the reply's `cut` / `to`) and change nothing: a hover preview, read-only
+        #[serde(default)]
+        preview: bool,
+    },
+    /// Offset paper line work: a parallel copy `distance_mm` away (a new item with the same pen). Say which side
+    /// with `at_mm` (the side that point is on), or `side`: `left` or `right` of the way the line runs from its first
+    /// point (as the sheet looks), or `inside` / `outside` for a rect or a closed polyline. Lines move over,
+    /// polylines get mitred corners, arcs get a bigger or smaller radius, rects grow or shrink.
+    SheetOffset {
+        item: Id,
+        distance_mm: f64,
+        #[serde(default)]
+        at_mm: Option<[f64; 2]>,
+        #[serde(default)]
+        side: Option<String>,
+    },
     /// Attach broken anchors again. `{"item": id, "anchor": 1, "to": {..an anchor..}}` attaches one where you say.
     /// `{"all_exact": true}` (optionally with `item` or `sheet`) attaches every broken anchor that has exactly one
     /// vertex within 1 micrometre of where it last was, and leaves the rest. Nothing reattaches by itself.
@@ -460,6 +632,71 @@ pub enum Command {
         #[serde(default)]
         sheet: Option<Id>,
     },
+    /// Read-only: the points of a viewport's drawing a dimension can attach to, where each is on the paper (mm from the
+    /// sheet's top left) and the anchor to give `sheet_dim` for it. `kinds`: `vertex` (default: the model's corners
+    /// the drawing shows), `midpoint` (the middle of each edge), `opening` (the sides of doors and windows, plans
+    /// only). `limit` (default 500, at most 5,000) caps the list; `total` says how many there were.
+    ViewportPoints {
+        viewport: Id,
+        #[serde(default)]
+        kinds: Vec<String>,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
+    /// Attached dimension strings worked out from a plan viewport's floor (`callouts::auto_dims`): `exterior` (the
+    /// overall width on the south and depth on the east), `openings` (a chain through both sides of every door and
+    /// window on each face), `interior` (every wall face along the building, drawn on the north and the west), `grids`
+    /// (column centres and guide points). `scope` is one of these or a list (default exterior and openings). Adds
+    /// only: dimensions it made before (marked `source: "auto"`) are skipped, never doubled, and nobody else's is
+    /// touched; `refresh: true` replaces its own for those scopes. One undo step.
+    DimensionAuto {
+        viewport: Id,
+        #[serde(default)]
+        scope: Option<ScopeArg>,
+        #[serde(default)]
+        refresh: bool,
+    },
+    /// Lay out a set of saved, editable sheets from the building in one undo step. `preset: "permit"`: a cover with
+    /// the sheet index, a plan per floor, the four elevations, a section through the stairs (when there are stairs)
+    /// and the door and window schedule. `paper` (default a3), `scale` (one scale for every drawing; default the
+    /// largest that fits), `project`.
+    LayoutPreset {
+        #[serde(default = "preset_permit")]
+        preset: String,
+        #[serde(default)]
+        paper: Option<String>,
+        #[serde(default)]
+        scale: Option<ScaleArg>,
+        #[serde(default)]
+        project: Option<String>,
+    },
+    /// Read-only: a saved sheet's drawing as its display list, in light JSON (paper mm, y down; paths as SVG path
+    /// strings, joined per pen): what the app's paper view draws. `limit_kb` caps the answer (default and most
+    /// 16384); past it the rest is left out and `truncated` is true.
+    SheetIr {
+        sheet: Id,
+        #[serde(default)]
+        limit_kb: Option<usize>,
+    },
+    /// Put the sheets in this order (every sheet's id once, first first): orders 0, 10, 20... One undo step.
+    SheetOrder { sheets: Vec<Id> },
+    /// A copy of a sheet with everything on it (viewports, dimensions, line work, text), placed right after it in
+    /// the set. One undo step.
+    SheetDuplicate {
+        sheet: Id,
+        #[serde(default)]
+        name: Option<String>,
+    },
+    /// A saved sheet as a PNG picture (`path`), `px` wide (default 1600, 200 to 4000), to look at and check.
+    SheetRender {
+        sheet: Id,
+        path: String,
+        #[serde(default)]
+        px: Option<u32>,
+    },
+    /// Read-only: how the kept drawings of sheet viewports stand (`revision` moves when a change drops some;
+    /// `drawing`: the background worker is redrawing), with counters.
+    DraftingStatus,
     /// A blueprint set in one go: every floor's plan and the four
     /// elevations, white on blue, at a true scale that fits the sheet.
     Blueprint {
@@ -1147,6 +1384,18 @@ fn sheet_a3() -> String {
     "a3".into()
 }
 
+fn preset_permit() -> String {
+    "permit".into()
+}
+
+/// `dimension_auto`'s scope: one name or a list of them.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum ScopeArg {
+    One(String),
+    Many(Vec<String>),
+}
+
 /// A paper size as a command gives it: a name, or millimetres.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
@@ -1181,6 +1430,22 @@ pub struct AnchorArg {
     pub guide: Option<Id>,
     /// component placements from the root down, for geometry inside components
     pub path: Vec<Id>,
+}
+
+/// What a paper line work command may set. All optional on an edit; a new item needs `sheet` and `pts_mm`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct LineArgs {
+    /// the item to change (leave out to add one)
+    pub id: Option<Id>,
+    pub sheet: Option<Id>,
+    /// line, polyline, arc or rect
+    pub kind: Option<String>,
+    pub pts_mm: Option<Vec<[f64; 2]>>,
+    pub w_mm: Option<f64>,
+    pub color: Option<String>,
+    pub dash_mm: Option<Vec<f64>>,
+    pub z: Option<i32>,
 }
 
 /// What a viewport command may set. All optional: a new viewport gets sensible defaults (see `sheets.rs`).
@@ -1344,4 +1609,55 @@ fn x_axis() -> [f64; 3] {
 
 fn z_axis() -> [f64; 3] {
     [0.0, 0.0, 1.0]
+}
+
+/// The cut fields `tag_style` takes; each optional (only what is given changes).
+#[derive(Debug, Default, Deserialize)]
+pub struct CutArgs {
+    #[serde(default)]
+    pub fill: Option<String>,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub outline_mm: Option<f64>,
+    /// intersection priority, a whole number 0 to 999 (higher wins where cuts of different tags overlap)
+    #[serde(default)]
+    pub priority: Option<i64>,
+}
+
+/// The hatch fields `tag_style` takes; each optional (only what is given changes).
+#[derive(Debug, Default, Deserialize)]
+pub struct HatchArgs {
+    #[serde(default)]
+    pub pattern: Option<String>,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub weight_mm: Option<f64>,
+    #[serde(default)]
+    pub scale: Option<f64>,
+    #[serde(default)]
+    pub angle: Option<f64>,
+    #[serde(default)]
+    pub scale_mode: Option<String>,
+}
+
+/// One cell's new text (`sheet_table`).
+#[derive(Debug, Deserialize)]
+pub struct CellArg {
+    pub row: usize,
+    pub col: usize,
+    pub text: String,
+}
+
+/// Rows or columns from `at`, `n` of them (default 1).
+#[derive(Debug, Deserialize)]
+pub struct SpanArg {
+    pub at: usize,
+    #[serde(default = "one_usize")]
+    pub n: usize,
+}
+
+fn one_usize() -> usize {
+    1
 }

@@ -7,8 +7,19 @@ use crate::layout::{PageSpec, ViewportSpec};
 use crate::model::Model;
 use anyhow::{bail, Result};
 
-/// Most pages a sheet set may have.
-pub const MAX_PAGES: usize = 50;
+/// Most pages a sheet set may have (the most sheets the person's model may hold, `policy::MAX_PAGES_UI`).
+pub const MAX_PAGES: usize = crate::policy::MAX_PAGES_UI;
+
+/// Where a set's drawings come from and how its pages are numbered.
+#[derive(Clone, Copy, Default)]
+pub struct Opts<'a> {
+    /// drawings kept between builds (the engine's); None: every viewport is drawn
+    pub cache: Option<&'a super::cache::Drawings>,
+    /// the number of the first page, less one ("Sheet 5 of 52" for one page drawn alone)
+    pub first: usize,
+    /// how many pages the whole set has (None: these)
+    pub total: Option<usize>,
+}
 
 /// Lay viewports out in a grid where they have no size of their own.
 pub(crate) fn place(vps: &mut [ViewportSpec], sw: f64, sh: f64) {
@@ -36,7 +47,13 @@ pub fn build(m: &Model, sheet: &str, project: &str, pages: Vec<PageSpec>, bluepr
 
 /// `build`; `fill` false: a page with nothing on it is drawn empty, not given the model's views.
 #[allow(clippy::too_many_arguments)]
-pub fn build_with(m: &Model, sheet: &str, project: &str, mut pages: Vec<PageSpec>, blueprint: bool, notes: &[String], date: &str, fill: bool) -> Result<Doc> {
+pub fn build_with(m: &Model, sheet: &str, project: &str, pages: Vec<PageSpec>, blueprint: bool, notes: &[String], date: &str, fill: bool) -> Result<Doc> {
+    build_opts(m, sheet, project, pages, blueprint, notes, date, fill, Opts::default())
+}
+
+/// `build_with`, with kept drawings and page numbers (`Opts`).
+#[allow(clippy::too_many_arguments)]
+pub fn build_opts(m: &Model, sheet: &str, project: &str, mut pages: Vec<PageSpec>, blueprint: bool, notes: &[String], date: &str, fill: bool, o: Opts) -> Result<Doc> {
     let (sw, sh) = sheet_mm(sheet)?;
     if fill {
         // saved views in a grid, or the four standard views
@@ -45,7 +62,7 @@ pub fn build_with(m: &Model, sheet: &str, project: &str, mut pages: Vec<PageSpec
             pages.push(PageSpec { title: "Views".into(), ..Default::default() });
         }
         for p in &mut pages {
-            if p.viewports.is_empty() && p.table.is_empty() {
+            if p.viewports.is_empty() && p.table.is_empty() && p.tables.is_empty() {
                 p.viewports = defaults.clone();
             }
         }
@@ -54,8 +71,11 @@ pub fn build_with(m: &Model, sheet: &str, project: &str, mut pages: Vec<PageSpec
         bail!("a PDF holds at most {MAX_PAGES} pages here, and this set has {}: export part of it with pages: [sheet ids]", pages.len());
     }
     let bm = crate::environment::without(m);
-    let pens = Pens::new(blueprint);
-    let total = pages.len();
+    let mut pens = Pens::new(blueprint);
+    pens.hatches = o.cache.map(|c| c.hatches.clone());
+    // the model's world geometry once for every viewport (kept with the drawings between changes)
+    pens.world = Some(o.cache.map_or_else(Default::default, |c| c.world()));
+    let total = o.total.unwrap_or(pages.len());
     let mut doc = Doc { title: project.to_string(), lang: String::new(), pages: Vec::new() };
     for (pi, page) in pages.iter_mut().enumerate() {
         place(&mut page.viewports, sw, sh);
@@ -63,29 +83,70 @@ pub fn build_with(m: &Model, sheet: &str, project: &str, mut pages: Vec<PageSpec
         // sheet border
         cv.rect(10.0 * PT, 10.0 * PT, (sw - 20.0) * PT, (sh - 20.0) * PT, &pens.ink(pens.border));
         // the title block first: the project (H1) and the page's title (H2) lead the page in reading order
-        title_block(&mut cv, &pens, project, &page.title, date, pi + 1, total, sw, sh);
-        // every viewport on its own thread (a few at a time), drawn in order
-        let mut drawn: Vec<Result<Vec<Prim>>> = Vec::new();
-        for group in page.viewports.chunks(4) {
-            let got: Vec<Result<Vec<Prim>>> = std::thread::scope(|s| {
-                let hs: Vec<_> = group.iter().map(|v| s.spawn(|| viewport(m, &bm, v, &pens, sh))).collect();
-                hs.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("a viewport's drawing stopped unexpectedly")))).collect()
-            });
-            drawn.extend(got);
+        title_block(&mut cv, &pens, project, &page.title, date, o.first + pi + 1, total, sw, sh);
+        // kept drawings first; every other viewport on its own thread (a few at a time), drawn in order
+        for d in draw_viewports(m, &bm, &page.viewports, &pens, sh, o.cache, None) {
+            cv.out.extend(d?.iter().cloned());
         }
-        for d in drawn {
-            cv.out.extend(d?);
+        // paper line work, over the viewports and under the dimensions
+        for l in &page.lines {
+            let pen = Pen { w: l.w, rgb: l.rgb.unwrap_or(pens.ink), dash: l.dash.clone() };
+            cv.push(Prim::Path(PathPrim { segs: l.segs.clone(), pen: Some(pen), fill: None, prov: None }));
+        }
+        // paper text, over the line work
+        for t in &page.texts {
+            super::table::draw_text(&mut cv, &pens, t);
         }
         // dimensions attached to the model, drawn over the viewports
         for d in &page.dims {
             super::dims::draw(&mut cv, &pens, d);
         }
         table(&mut cv, &pens, page);
+        // saved tables, over everything but the notes
+        for (i, t) in page.tables.iter().enumerate() {
+            super::table::draw_table(&mut cv, &pens, t, (i + 1).min(u16::MAX as usize) as u16);
+        }
         notes_box(&mut cv, &pens, notes, sw, sh);
         doc.pages.push(Page { w: sw, h: sh, bg: blueprint.then_some(BP_PAPER), title: format!("{project}: {}", page.title), items: cv.out });
     }
     Ok(doc)
 }
+
+/// Most viewports drawn at once (each on its own thread; a drawing can hold a lot of memory while it is made).
+pub const VIEWPORT_THREADS: usize = 4;
+/// The same on the background worker, which shares the machine with the person's work.
+pub const BACKGROUND_THREADS: usize = 2;
+
+/// The drawings of `vps` (placed on their page), in order: kept ones from `cache`, the rest drawn (and kept).
+/// `background`: the cache's epoch when the model `m` was copied for the background worker (what it draws is kept
+/// only if nothing changed since); its drawings are counted apart and it uses fewer threads.
+pub fn draw_viewports(m: &Model, bm: &Model, vps: &[ViewportSpec], pens: &Pens, sh: f64, cache: Option<&super::cache::Drawings>, background: Option<u64>) -> Vec<Result<std::sync::Arc<Vec<Prim>>>> {
+    use std::sync::Arc;
+    let epoch = background.unwrap_or_else(|| cache.map_or(0, |c| c.epoch()));
+    let threads = if background.is_some() { BACKGROUND_THREADS } else { VIEWPORT_THREADS };
+    let keys: Vec<String> = if cache.is_some() { vps.iter().map(|v| super::cache::key(v, pens, sh)).collect() } else { Vec::new() };
+    let mut out: Vec<Option<Result<Arc<Vec<Prim>>>>> = (0..vps.len()).map(|i| cache.and_then(|c| c.get(&keys[i])).map(Ok)).collect();
+    let missing: Vec<usize> = (0..vps.len()).filter(|i| out[*i].is_none()).collect();
+    for group in missing.chunks(threads) {
+        let got: Vec<Result<Vec<Prim>>> = std::thread::scope(|s| {
+            let hs: Vec<_> = group.iter().map(|i| s.spawn(|| viewport(m, bm, &vps[*i], pens, sh))).collect();
+            hs.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("a viewport's drawing stopped unexpectedly")))).collect()
+        });
+        for (i, r) in group.iter().zip(got) {
+            let r = r.map(Arc::new);
+            if let (Some(c), Ok(items)) = (cache, &r) {
+                c.put(keys[*i].clone(), super::cache::Volume::of(m, &vps[*i]), items.clone(), epoch, background.is_some());
+            }
+            out[*i] = Some(r);
+        }
+    }
+    out.into_iter().map(|r| r.unwrap_or_else(|| Err(anyhow::anyhow!("a viewport was not drawn")))).collect()
+}
+
+/// Line spacing of paper text, in font sizes.
+pub const TEXT_LEADING: f64 = 1.25;
+/// A letter height in mm is this many times the font size in mm (Inter's cap height is about 0.73 of its size).
+pub const CAP_OF_SIZE: f64 = 0.73;
 
 /// A table (schedule) at the top left.
 fn table(cv: &mut Cv, pens: &Pens, page: &PageSpec) {
@@ -108,7 +169,7 @@ fn table(cv: &mut Cv, pens: &Pens, page: &PageSpec) {
         cv.line((tx, y(top)), (tx + total_w, y(top)), &pens.ink(if ri <= 1 { pens.heavy } else { pens.thin }));
         let mut x = tx;
         for (ci, cell) in row.iter().enumerate() {
-            cv.role = Role::Cell { row: ri as u16, col: ci as u16, header: ri == 0 || ci == 0 };
+            cv.role = Role::Cell { table: 0, row: ri as u16, col: ci as u16, header: ri == 0 || ci == 0 };
             cv.text(x + 6.0, y(top + rh - 2.0), cell, size, ri == 0 || ci == 0, pens.ink, 0.0);
             cv.role = Role::Paragraph;
             x += widths[ci];
@@ -160,7 +221,7 @@ fn title_block(cv: &mut Cv, pens: &Pens, project: &str, title: &str, date: &str,
 }
 
 /// One viewport: its content clipped to its frame, the frame, caption and scale bar.
-fn viewport(m: &Model, bm: &Model, v: &ViewportSpec, pens: &Pens, sh: f64) -> Result<Vec<Prim>> {
+pub(crate) fn viewport(m: &Model, bm: &Model, v: &ViewportSpec, pens: &Pens, sh: f64) -> Result<Vec<Prim>> {
     let mut cv = Cv::new(sh);
     let y = |mm: f64| (sh - mm) * PT;
     let (label, denom) = if let Some(z) = v.cut {
@@ -201,6 +262,7 @@ fn viewport(m: &Model, bm: &Model, v: &ViewportSpec, pens: &Pens, sh: f64) -> Re
                 alt.push_str("...");
             }
             g.alt = Some(alt);
+            g.opacity = v.opacity.map_or(1.0, |o| o.clamp(0.0, 1.0));
         }
     }
     if let Some(d) = denom {

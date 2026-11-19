@@ -6,7 +6,8 @@ use super::*;
 use crate::drafting::*;
 use crate::layout::{PageSpec, ViewportSpec};
 use crate::policy::{MAX_PAGES_UI, MAX_PAGES_UNTRUSTED};
-use super::command::{ExportPage, PaperArg, ScaleArg, ViewportArgs};
+use super::command::{ExportPage, LineArgs, PaperArg, ScaleArg, ViewportArgs};
+use crate::draft::linework;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -113,7 +114,7 @@ fn scale_text(n: f64) -> String {
 }
 
 /// The model's bounds, worked out once per command (finding them walks every face and edge).
-type Bounds = Option<(DVec3, DVec3)>;
+pub(super) type Bounds = Option<(DVec3, DVec3)>;
 
 fn bounds_center(b: Bounds) -> DVec3 {
     b.map(|(lo, hi)| (lo + hi) / 2.0).unwrap_or(DVec3::ZERO)
@@ -155,12 +156,40 @@ fn validate(v: &Viewport) -> Result<()> {
 }
 
 impl Engine {
-    fn sheet_limit(&self) -> usize {
+    pub(super) fn sheet_limit(&self) -> usize {
         if self.untrusted { MAX_PAGES_UNTRUSTED } else { MAX_PAGES_UI }
     }
 
-    fn made_by(&self) -> String {
+    pub(super) fn made_by(&self) -> String {
         if self.untrusted { "agent".into() } else { String::new() }
+    }
+
+    /// An agent or a plugin is adding viewports (`adding`: how many on each sheet) and the model gains `new` of them
+    /// (0 when they only move between sheets): within `MAX_VIEWPORTS_PER_SHEET_UNTRUSTED` on a sheet and
+    /// `MAX_VIEWPORTS_UNTRUSTED` in the model? The person is not limited here.
+    pub(super) fn viewport_room(&self, adding: &BTreeMap<Id, usize>, new: usize) -> Result<()> {
+        use crate::policy::{MAX_VIEWPORTS_PER_SHEET_UNTRUSTED as PER_SHEET, MAX_VIEWPORTS_UNTRUSTED as TOTAL};
+        if !self.untrusted || adding.values().all(|n| *n == 0) {
+            return Ok(());
+        }
+        let mut per: BTreeMap<Id, usize> = BTreeMap::new();
+        let mut total = 0usize;
+        for i in self.model.sheet_items.values() {
+            if let SheetItem::Known(ItemKind::Viewport(v)) = &**i {
+                *per.entry(v.sheet).or_default() += 1;
+                total += 1;
+            }
+        }
+        if total.saturating_add(new) > TOTAL {
+            bail!("that would make {} viewports in the model; an agent or a plugin can make at most {TOTAL} (the person can add more)", total.saturating_add(new));
+        }
+        for (s, n) in adding {
+            let now = per.get(s).copied().unwrap_or(0).saturating_add(*n);
+            if now > PER_SHEET {
+                bail!("that would put {now} viewports on sheet {s}; an agent or a plugin puts at most {PER_SHEET} on one sheet (the person can add more)");
+            }
+        }
+        Ok(())
     }
 
     /// A new viewport from what a command gave, with defaults for the rest (and the anchor fixed here, once).
@@ -204,10 +233,11 @@ impl Engine {
     }
 
     /// One page of a `sheets` description becomes a sheet with its viewports and table.
-    fn sheet_from_page(&mut self, page: &PageSpec, paper: &Paper, order: i32, fields: &BTreeMap<String, String>, b: Bounds) -> Result<Id> {
+    pub(super) fn sheet_from_page(&mut self, page: &PageSpec, paper: &Paper, order: i32, fields: &BTreeMap<String, String>, b: Bounds) -> Result<Id> {
         short("a page title", &page.title)?;
         let id = self.model.new_id();
         self.model.sheets.insert(id, Sheet { name: page.title.clone(), paper: paper.clone(), order, fields: fields.clone(), ..Default::default() });
+        self.viewport_room(&BTreeMap::from([(id, page.viewports.len())]), page.viewports.len())?;
         let mut vps = page.viewports.clone();
         crate::layout::place(&mut vps, paper.w_mm, paper.h_mm);
         let who = self.made_by();
@@ -221,9 +251,15 @@ impl Engine {
             self.model.sheet_items.insert(vid, Arc::new(SheetItem::Known(ItemKind::Viewport(v))));
         }
         if !page.table.is_empty() {
-            let cols = page.table.iter().map(|r| r.len()).max().unwrap_or(0);
-            let cols_mm: Vec<f64> = (0..cols).map(|c| page.table.iter().map(|r| r.get(c).map_or(0, |s| s.chars().count())).max().unwrap_or(0) as f64 * 1.6 + 6.0).collect();
-            let t = Table { sheet: id, at_mm: [20.0, 24.0], cols_mm, rows: page.table.clone(), made_by: who, ..Default::default() };
+            // a schedule or index: titled with the page, its first column heading the rows, columns fitted to the text
+            // the same limits and cell rules as `sheet_table`
+            let (r, c) = (page.table.len(), page.table.iter().map(Vec::len).max().unwrap_or(0));
+            if r > MAX_TABLE_ROWS || c > MAX_TABLE_COLS || r.saturating_mul(c) > MAX_TABLE_CELLS {
+                bail!("a page's table has at most {MAX_TABLE_ROWS} rows, {MAX_TABLE_COLS} columns and {MAX_TABLE_CELLS} cells (this is {r} by {c})");
+            }
+            let rows = page.table.iter().map(|r| r.iter().map(|c| super::tables::clean_cell(c)).collect::<Result<Vec<_>>>()).collect::<Result<Vec<_>>>()?;
+            let t = Table { sheet: id, at_mm: [20.0, 26.0], rows, title: page.title.to_uppercase(), header_cols: 1, made_by: who, ..Default::default() };
+            super::tables::check(&t)?;
             let tid = self.model.new_id();
             self.model.sheet_items.insert(tid, Arc::new(SheetItem::Known(ItemKind::Table(t))));
         }
@@ -345,6 +381,69 @@ impl Engine {
                 }
                 json!({"deleted": gone.len()})
             }
+            Command::SheetOrder { sheets } => {
+                let m = &mut self.model;
+                let mut seen = std::collections::BTreeSet::new();
+                for id in &sheets {
+                    if !m.sheets.contains_key(id) {
+                        bail!("no sheet {id}");
+                    }
+                    if !seen.insert(*id) {
+                        bail!("sheet {id} is listed twice");
+                    }
+                }
+                if seen.len() != m.sheets.len() {
+                    bail!("list every sheet once ({} given, the model has {}): sheets_info lists them", seen.len(), m.sheets.len());
+                }
+                let mut moved = 0;
+                for (i, id) in sheets.iter().enumerate() {
+                    let want = i32::try_from(i).unwrap_or(i32::MAX / 10).saturating_mul(10);
+                    let s = m.sheets.get_mut(id).expect("checked above");
+                    if s.order != want {
+                        s.order = want;
+                        moved += 1;
+                    }
+                }
+                json!({"sheets": sheets, "renumbered": moved})
+            }
+            Command::SheetDuplicate { sheet, name } => {
+                if self.model.sheets.len() >= self.sheet_limit() {
+                    bail!("a model holds at most {} sheets", self.sheet_limit());
+                }
+                let Some(orig) = self.model.sheets.get(&sheet).cloned() else { bail!("no sheet {sheet}") };
+                let items: Vec<(Id, Arc<SheetItem>)> = self.model.sheet_items.iter().filter(|(_, i)| i.sheet() == Some(sheet)).map(|(k, i)| (*k, i.clone())).collect();
+                if self.untrusted && items.len() > crate::policy::MAX_SHEET_ITEMS_UNTRUSTED {
+                    bail!("sheet {sheet} has {} items; an agent or plugin copies at most {}", items.len(), crate::policy::MAX_SHEET_ITEMS_UNTRUSTED);
+                }
+                // the copy's viewports all land on a new sheet (no id yet: one no sheet has)
+                let vps = items.iter().filter(|(_, i)| matches!(&**i, SheetItem::Known(ItemKind::Viewport(_)))).count();
+                self.viewport_room(&BTreeMap::from([(Id::MAX, vps)]), vps)?;
+                let name = name.unwrap_or_else(|| format!("{} copy", orig.name));
+                short("the name", &name)?;
+                // right after the original: everything after it moves down one
+                for s in self.model.sheets.values_mut().filter(|s| s.order > orig.order) {
+                    s.order = s.order.saturating_add(1);
+                }
+                let id = self.model.new_id();
+                let issued = vec![]; // a copy hasn't been issued
+                self.model.sheets.insert(id, Sheet { name, order: orig.order.saturating_add(1), issued, ..orig });
+                // every item, with the new sheet (known kinds and ones this version doesn't know alike, through their saved form)
+                let ids: BTreeMap<Id, Id> = items.iter().map(|(old, _)| (*old, self.model.new_id())).collect();
+                let mut made = vec![];
+                for (old, item) in items {
+                    let mut v = serde_json::to_value(&*item)?;
+                    let Some(o) = v.as_object_mut() else { continue };
+                    o.insert("sheet".into(), json!(id));
+                    // a dimension measured in one of the sheet's viewports measures in that viewport's copy
+                    if let Some(vp) = o.get("viewport").and_then(Value::as_u64).and_then(|n| Id::try_from(n).ok()).and_then(|n| ids.get(&n)) {
+                        o.insert("viewport".into(), json!(vp));
+                    }
+                    let copy: SheetItem = serde_json::from_value(v).map_err(|e| anyhow::anyhow!("sheet item {old} could not be copied: {e}"))?;
+                    self.model.sheet_items.insert(ids[&old], Arc::new(copy));
+                    made.push(json!([old, ids[&old]]));
+                }
+                json!({"sheet": id, "items": made})
+            }
             Command::ViewportAdd { args, viewports } => {
                 let fallback = args.sheet;
                 let mut made = vec![];
@@ -352,6 +451,11 @@ impl Engine {
                 // check all of them before adding any (a bad one in the list adds nothing)
                 let bounds = self.model.world_bounds();
                 let built: Vec<Viewport> = list.iter().map(|a| self.viewport_from(a, fallback, bounds)).collect::<Result<_>>()?;
+                let mut adding: BTreeMap<Id, usize> = BTreeMap::new();
+                for v in &built {
+                    *adding.entry(v.sheet).or_default() += 1;
+                }
+                self.viewport_room(&adding, built.len())?;
                 for v in built {
                     let id = self.model.new_id();
                     self.model.sheet_items.insert(id, Arc::new(SheetItem::Known(ItemKind::Viewport(v))));
@@ -367,6 +471,9 @@ impl Engine {
                 if let Some(s) = args.sheet {
                     if !self.model.sheets.contains_key(&s) {
                         bail!("no sheet {s}");
+                    }
+                    if s != v.sheet {
+                        self.viewport_room(&BTreeMap::from([(s, 1)]), 0)?;
                     }
                     v.sheet = s;
                 }
@@ -526,6 +633,178 @@ impl Engine {
                     _ => bail!("give `to` (with `item` and `anchor`) to attach one anchor, or `all_exact: true` to attach every broken anchor that has exactly one vertex where it was"),
                 }
             }
+            Command::SheetLine { args, lines } => {
+                let list: Vec<&LineArgs> = if lines.is_empty() { vec![&args] } else { lines.iter().collect() };
+                if list.len() > MAX_LINES_PER_COMMAND {
+                    bail!("one command adds at most {MAX_LINES_PER_COMMAND} lines");
+                }
+                // check all of them before changing anything
+                let built: Vec<(Option<Id>, ItemKind)> = list.iter().map(|a| self.line_from(a, args.sheet)).collect::<Result<_>>()?;
+                let mut made = vec![];
+                for (id, kind) in built {
+                    let id = match id {
+                        Some(id) => id,
+                        None => self.model.new_id(),
+                    };
+                    self.model.sheet_items.insert(id, Arc::new(SheetItem::Known(kind)));
+                    made.push(id);
+                }
+                json!({"item": made.first(), "items": made})
+            }
+            c @ (Command::SheetTable { .. } | Command::SheetTablePaste { .. }) => self.run_tables(c)?,
+            Command::SheetText { id, sheet, at_mm, text, height_mm, width_mm, align, z } => {
+                let mut t = match id {
+                    Some(id) => {
+                        let Some(item) = self.model.sheet_items.get(&id) else { bail!("no sheet item {id}") };
+                        let SheetItem::Known(ItemKind::Text(t)) = &**item else { bail!("sheet item {id} is a {}, not text", item.kind_name()) };
+                        if sheet.is_some_and(|s| s != t.sheet) {
+                            bail!("a text stays on its sheet (leave `sheet` out when changing one)");
+                        }
+                        t.clone()
+                    }
+                    None => {
+                        let Some(s) = sheet else { bail!("say which sheet the text goes on (`sheet`), or which text to change (`id`)") };
+                        if !self.model.sheets.contains_key(&s) {
+                            bail!("no sheet {s}");
+                        }
+                        if at_mm.is_none() || text.is_none() {
+                            bail!("new text needs `at_mm` (where its first line starts) and `text`");
+                        }
+                        Text { sheet: s, made_by: self.made_by(), ..Default::default() }
+                    }
+                };
+                if let Some(p) = at_mm {
+                    if !p.iter().all(|x| x.is_finite() && x.abs() <= linework::MAX_COORD) {
+                        bail!("at_mm is a point on the sheet, in millimetres");
+                    }
+                    t.at_mm = p;
+                }
+                if let Some(words) = &text {
+                    let n = words.chars().count();
+                    if n > MAX_TEXT_CHARS {
+                        bail!("a paper text holds at most {MAX_TEXT_CHARS} characters (this has {n})");
+                    }
+                    if words.chars().any(|c| c.is_control() && c != '\n' && c != '\t') {
+                        bail!("the text has control characters in it");
+                    }
+                    let lines: Vec<String> = words.replace('\t', "    ").split('\n').map(|l| l.trim_end().to_string()).collect();
+                    if lines.iter().all(|l| l.trim().is_empty()) {
+                        bail!("the text is empty: delete it with sheet_item_delete instead");
+                    }
+                    t.paragraphs = lines;
+                }
+                if let Some(h) = height_mm {
+                    if !(h.is_finite() && (TEXT_HEIGHT_RANGE.0..=TEXT_HEIGHT_RANGE.1).contains(&h)) {
+                        bail!("height_mm is between {} and {} mm", TEXT_HEIGHT_RANGE.0, TEXT_HEIGHT_RANGE.1);
+                    }
+                    t.height_mm = (h != TEXT_HEIGHT).then_some(h);
+                }
+                if let Some(w) = width_mm {
+                    if !(w.is_finite() && (w == 0.0 || (BLOCK_WIDTH_RANGE.0..=BLOCK_WIDTH_RANGE.1).contains(&w))) {
+                        bail!("width_mm is 0 (plain text) or {} to {} mm (a text block wrapped to it)", BLOCK_WIDTH_RANGE.0, BLOCK_WIDTH_RANGE.1);
+                    }
+                    t.box_mm = (w > 0.0).then_some([w, 0.0]);
+                }
+                if let Some(a) = align {
+                    t.align = a;
+                }
+                if let Some(z) = z {
+                    t.z = z;
+                }
+                let id = id.unwrap_or_else(|| self.model.new_id());
+                self.model.sheet_items.insert(id, Arc::new(SheetItem::Known(ItemKind::Text(t))));
+                json!({"item": id, "text": id})
+            }
+            Command::SheetTrim { item, at_mm, pick_tol_mm, use_model, preview } => {
+                let (kind, chain, g, sheet) = self.pick_line_work(item, at_mm, pick_tol_mm)?;
+                let b = self.boundaries(sheet, item, use_model.unwrap_or(true));
+                let hits = chain.crossings(&b.curves);
+                let t = linework::trim(&chain, g, &hits)?;
+                if preview {
+                    // what would go, for the editor's hover preview; nothing changes
+                    let whole = t.kept.is_empty();
+                    return Ok(json!({"item": item, "preview": true, "unchanged": true, "cut": {"from": t.cut[0], "to": t.cut[1]}, "pieces": t.kept.len(), "whole": whole}));
+                }
+                let mut pieces: Vec<ItemKind> = Vec::new();
+                for run in &t.kept {
+                    match linework::item_of(&kind, run) {
+                        Some(k) => pieces.push(k),
+                        None => bail!("this line work can't be trimmed (it has a piece the item kinds can't hold)"),
+                    }
+                }
+                if pieces.is_empty() {
+                    bail!("trimming there would leave nothing of the item: delete it with sheet_item_delete instead");
+                }
+                let mut ids: Vec<Id> = Vec::new();
+                let mut created: Vec<Id> = Vec::new();
+                let mut it = pieces.into_iter();
+                if let Some(first) = it.next() {
+                    self.model.sheet_items.insert(item, Arc::new(SheetItem::Known(first)));
+                    ids.push(item);
+                }
+                for k in it {
+                    let id = self.model.new_id();
+                    self.model.sheet_items.insert(id, Arc::new(SheetItem::Known(k)));
+                    ids.push(id);
+                    created.push(id);
+                }
+                json!({"item": item, "kept": ids, "created": created, "cut": {"from": t.cut[0], "to": t.cut[1]}, "boundaries": b.json()})
+            }
+            Command::SheetExtend { item, at_mm, pick_tol_mm, use_model, preview } => {
+                let (kind, chain, _, sheet) = self.pick_line_work(item, at_mm, pick_tol_mm)?;
+                let b = self.boundaries(sheet, item, use_model.unwrap_or(true));
+                let (w, h) = self.model.sheets.get(&sheet).map_or((0.0, 0.0), |s| (s.paper.w_mm, s.paper.h_mm));
+                let (grown, end) = linework::extend(&chain, at_mm, &b.curves, 2.0 * w.hypot(h).max(1.0))?;
+                if preview {
+                    let from = if end { chain.end() } else { chain.start() };
+                    return Ok(json!({"item": item, "preview": true, "unchanged": true, "end": if end { "end" } else { "start" }, "from": from, "to": if end { grown.end() } else { grown.start() }}));
+                }
+                let Some(k) = linework::item_of(&kind, &grown.curves) else { bail!("this line work can't be extended") };
+                self.model.sheet_items.insert(item, Arc::new(SheetItem::Known(k)));
+                json!({"item": item, "end": if end { "end" } else { "start" }, "to": if end { grown.end() } else { grown.start() }, "boundaries": b.json()})
+            }
+            Command::SheetOffset { item, distance_mm, at_mm, side } => {
+                let Some(old) = self.model.sheet_items.get(&item).cloned() else { bail!("no sheet item {item}") };
+                let SheetItem::Known(kind @ (ItemKind::Line(_) | ItemKind::Polyline(_) | ItemKind::Arc(_) | ItemKind::Rect(_))) = &*old else { bail!("sheet item {item} is a {}, not paper line work", old.kind_name()) };
+                let chain = linework::Chain::of(kind)?;
+                let side = match (side.as_deref(), at_mm) {
+                    (Some(_), Some(_)) => bail!("give `at_mm` or `side`, not both"),
+                    (None, None) => bail!("say which side the copy goes to: `at_mm` (a point on that side) or `side` (left, right, inside or outside)"),
+                    (None, Some(p)) => {
+                        if !p.iter().all(|x| x.is_finite() && x.abs() <= linework::MAX_COORD) {
+                            bail!("at_mm is a point on the sheet, in millimetres");
+                        }
+                        linework::Side::Toward(p)
+                    }
+                    (Some(s), None) => match s.to_ascii_lowercase().as_str() {
+                        "left" => linework::Side::Left,
+                        "right" => linework::Side::Right,
+                        "inside" => linework::Side::Inside,
+                        "outside" => linework::Side::Outside,
+                        other => bail!("side is left, right, inside or outside (got {other:?})"),
+                    },
+                };
+                let copy = linework::offset(&chain, distance_mm, &side)?;
+                let made = match kind {
+                    ItemKind::Rect(s) => {
+                        let Some(c) = linework::rect_of(&copy).filter(|_| linework::is_axis_rect(&copy)) else { bail!("the rectangle can't be offset by that much") };
+                        ItemKind::Rect(Shape { pts_mm: c.to_vec(), made_by: self.made_by(), ..s.clone() })
+                    }
+                    other => {
+                        let Some(k) = linework::item_of(other, &copy.curves) else { bail!("this line work can't be offset") };
+                        k
+                    }
+                };
+                let made = match made {
+                    ItemKind::Line(s) => ItemKind::Line(Shape { made_by: self.made_by(), ..s }),
+                    ItemKind::Polyline(s) => ItemKind::Polyline(Shape { made_by: self.made_by(), ..s }),
+                    ItemKind::Arc(s) => ItemKind::Arc(Shape { made_by: self.made_by(), ..s }),
+                    other => other,
+                };
+                let id = self.model.new_id();
+                self.model.sheet_items.insert(id, Arc::new(SheetItem::Known(made)));
+                json!({"item": id, "from": item})
+            }
             Command::SheetsInfo { sheet } => {
                 let m = &self.model;
                 if let Some(s) = sheet.filter(|s| !m.sheets.contains_key(s)) {
@@ -544,6 +823,18 @@ impl Engine {
                             let spans: Vec<Value> = me.segments.iter().map(|s| json!({"from": s.from, "to": s.to, "value_m": s.value, "text": s.value.map_or("?".to_string(), |v| crate::units::format(v, units))})).collect();
                             let broken: Vec<Value> = m.broken_anchors(d).into_iter().map(|a| json!({"anchor": a, "last": d.anchors[a].last, "suggestions": m.anchors_at(DVec3::from(d.anchors[a].last), crate::anchors::REATTACH_TOL).into_iter().take(5).collect::<Vec<_>>()})).collect();
                             o.insert("measured".into(), json!({"spans": spans, "broken": broken, "attached": broken.is_empty()}));
+                            // where its anchors are on the paper now (a broken one: where it last was), for the editor
+                            if let Some(dd) = crate::draft::dims::prepare(m, d) {
+                                let pts: Vec<[f64; 2]> = dd.pts.iter().zip(&dd.last).map(|(p, l)| p.unwrap_or(*l)).collect();
+                                o.insert("paper_mm".into(), json!(pts));
+                            }
+                        }
+                        // a table's rows and columns on the paper (and a linked one's live rows); a text's box
+                        if let SheetItem::Known(ItemKind::Table(t)) = i {
+                            o.insert("layout".into(), super::tables::table_info(m, t));
+                        }
+                        if let SheetItem::Known(ItemKind::Text(t)) = i {
+                            o.insert("layout".into(), super::tables::text_info(t));
                         }
                     }
                     v
@@ -557,7 +848,11 @@ impl Engine {
                     .collect();
                 let unsupported: Vec<Value> = m.sheet_items.iter().filter(|(_, i)| i.is_raw()).map(|(k, i)| json!({"id": k, "kind": i.kind_name(), "sheet": i.sheet()})).collect();
                 let orphans: Vec<&Id> = m.sheet_items.iter().filter(|(_, i)| i.sheet().is_none_or(|s| !m.sheets.contains_key(&s))).map(|(k, _)| k).collect();
-                json!({"sheets": sheets, "items": m.sheet_items.len(), "unsupported": unsupported, "orphans": orphans})
+                let mut v = json!({"sheets": sheets, "items": m.sheet_items.len(), "unsupported": unsupported, "orphans": orphans});
+                if self.untrusted {
+                    v["content_is_data"] = json!(crate::policy::TEXT_IS_DATA);
+                }
+                v
             }
             Command::ExportSheets { path, format, sheet, project, pages, blueprint, notes, page } => {
                 if let Some(f) = format.as_deref().filter(|f| !matches!(f.to_ascii_lowercase().as_str(), "pdf" | "svg" | "dxf")) {
@@ -580,8 +875,8 @@ impl Engine {
                 if !specs.is_empty() || (m.sheets.is_empty() && saved.is_empty()) {
                     // the one-shot set: nothing saved
                     let paper = sheet.unwrap_or_else(|| "a3".into());
-                    let n = crate::layout::write_sheets_page(m, &path, &paper, &project.unwrap_or_else(stem), specs.into_iter().cloned().collect(), blueprint.unwrap_or(false), &notes.unwrap_or_default(), true, page)?;
-                    return Ok(json!({"path": path, "pages": n}));
+                    let (n, warnings) = crate::layout::write_sheets_kept(m, &path, &paper, &project.unwrap_or_else(stem), specs.into_iter().cloned().collect(), blueprint.unwrap_or(false), &notes.unwrap_or_default(), true, page, Some(&self.drawings))?;
+                    return Ok(json!({"path": path, "pages": n, "warnings": warnings}));
                 }
                 // from the saved sheets, in their order (or the ids given, in the order given)
                 let mut chosen: Vec<Id> = if saved.is_empty() {
@@ -617,8 +912,8 @@ impl Engine {
                 let blueprint = blueprint.unwrap_or_else(|| first.fields.get("blueprint").is_some_and(|b| b == "true"));
                 let pages: Vec<PageSpec> = chosen.iter().map(|id| page_of(m, *id)).collect();
                 // saved sheets are drawn as they are: an empty one stays empty
-                let n = crate::layout::write_sheets_page(m, &path, &paper, &project, pages, blueprint, &notes, false, page)?;
-                json!({"path": path, "pages": n, "paper": paper})
+                let (n, warnings) = crate::layout::write_sheets_kept(m, &path, &paper, &project, pages, blueprint, &notes, false, page, Some(&self.drawings))?;
+                json!({"path": path, "pages": n, "paper": paper, "warnings": warnings})
             }
             other => unreachable!("command routed to the wrong group: {other:?}"),
         })
@@ -632,17 +927,26 @@ fn drop_legacy(v: &mut Viewport, key: &str) {
     }
 }
 
-/// A saved sheet as the page description the PDF writer takes: its viewports in stacking order, and its first table.
-fn page_of(m: &Model, sheet: Id) -> PageSpec {
+/// A saved sheet as the page description the PDF writer takes: its viewports, line work, text, dimensions and tables
+/// in stacking order.
+pub(super) fn page_of(m: &Model, sheet: Id) -> PageSpec {
     let s = &m.sheets[&sheet];
     let mut vps: Vec<(i32, Id, &Viewport)> = m.sheet_items.iter().filter_map(|(id, i)| if let SheetItem::Known(ItemKind::Viewport(v)) = &**i { (v.sheet == sheet).then_some((v.z, *id, v)) } else { None }).collect();
     vps.sort_by_key(|(z, id, _)| (*z, *id));
-    let table = m.sheet_items.values().find_map(|i| if let SheetItem::Known(ItemKind::Table(t)) = &**i { (t.sheet == sheet).then(|| t.rows.clone()) } else { None }).unwrap_or_default();
+    let mut tables: Vec<(i32, Id, &Table)> = m.sheet_items.iter().filter_map(|(id, i)| if let SheetItem::Known(ItemKind::Table(t)) = &**i { (t.sheet == sheet).then_some((t.z, *id, t)) } else { None }).collect();
+    tables.sort_by_key(|(z, id, _)| (*z, *id));
+    let tables = tables.iter().map(|(_, _, t)| super::tables::table_draw(m, t)).collect();
     // dimensions are worked out against the model as it is now: a moved wall has moved them
     let mut dims: Vec<(i32, Id, &Dimension)> = m.sheet_items.iter().filter_map(|(id, i)| if let SheetItem::Known(ItemKind::Dimension(d)) = &**i { (d.sheet == sheet).then_some((d.z, *id, d)) } else { None }).collect();
     dims.sort_by_key(|(z, id, _)| (*z, *id));
     let dims = dims.iter().filter_map(|(_, _, d)| crate::draft::dims::prepare(m, d)).collect();
-    PageSpec { title: s.name.clone(), viewports: vps.iter().map(|(_, _, v)| viewport_to_spec(v)).collect(), table, dims }
+    let mut shapes: Vec<(i32, Id, &ItemKind)> = m.sheet_items.iter().filter_map(|(id, i)| if let SheetItem::Known(k @ (ItemKind::Line(_) | ItemKind::Polyline(_) | ItemKind::Arc(_) | ItemKind::Rect(_))) = &**i { (k.sheet() == sheet).then(|| (shape_z(k), *id, k)) } else { None }).collect();
+    shapes.sort_by_key(|(z, id, _)| (*z, *id));
+    let lines = shapes.iter().filter_map(|(_, _, k)| crate::draft::linework::draw(k)).collect();
+    let mut texts: Vec<(i32, Id, &Text)> = m.sheet_items.iter().filter_map(|(id, i)| if let SheetItem::Known(ItemKind::Text(t)) = &**i { (t.sheet == sheet).then_some((t.z, *id, t)) } else { None }).collect();
+    texts.sort_by_key(|(z, id, _)| (*z, *id));
+    let texts = texts.iter().map(|(_, _, t)| super::tables::text_draw(t)).collect();
+    PageSpec { title: s.name.clone(), viewports: vps.iter().map(|(_, _, v)| viewport_to_spec(v)).collect(), table: Vec::new(), dims, lines, texts, tables }
 }
 
 /// The page description of an old-style viewport becomes a saved viewport. What the saved form has no field for
@@ -704,13 +1008,17 @@ fn spec_to_viewport(m: &Model, b: Bounds, spec: &ViewportSpec) -> Result<Viewpor
 }
 
 /// A saved viewport as the old-style description the PDF writer draws from (the reverse of `spec_to_viewport`).
-fn viewport_to_spec(v: &Viewport) -> ViewportSpec {
+pub(super) fn viewport_to_spec(v: &Viewport) -> ViewportSpec {
     let legacy = v.extra.get("legacy").cloned().unwrap_or(Value::Null);
     let l = |k: &str| legacy.get(k).cloned().unwrap_or(Value::Null);
     // a perspective view has no scale to draw at (the PDF takes a scale to mean parallel and to scale): fitted
     let perspective = matches!(v.view, ViewKind::View3d { parallel: false, .. });
     let fit = l("fit") == json!(true);
-    let mut s = ViewportSpec { x: v.rect_mm[0], y: v.rect_mm[1], w: v.rect_mm[2], h: v.rect_mm[3], label: (!v.label.is_empty()).then(|| v.label.clone()), scale: (!fit && !perspective).then(|| scale_text(v.scale)), callouts: l("callouts") == json!(true), ..Default::default() };
+    // a scaled drawing stays pinned to its saved anchor (as its dimensions are, through `anchors::viewport_proj`);
+    // a fitted or perspective one is fitted to what it shows each time
+    let mut s = ViewportSpec { anchor: (!fit && !perspective).then_some(v.anchor), x: v.rect_mm[0], y: v.rect_mm[1], w: v.rect_mm[2], h: v.rect_mm[3], label: (!v.label.is_empty()).then(|| v.label.clone()), scale: (!fit && !perspective).then(|| scale_text(v.scale)), callouts: l("callouts") == json!(true), opacity: (v.opacity < 1.0).then_some(v.opacity), ..Default::default() };
+    // `dimension_auto` put attached dimensions where the worked-out ones were
+    s.no_auto_dims = l("auto_dims") == json!(false);
     s.marks = serde_json::from_value(l("marks")).unwrap_or_default();
     s.levels = serde_json::from_value(l("levels")).unwrap_or_default();
     s.section_mark = serde_json::from_value::<Value>(l("section_mark")).ok().filter(|v| v.is_object()).and_then(|sm| {
@@ -743,4 +1051,202 @@ fn viewport_to_spec(v: &Viewport) -> ViewportSpec {
         }
     }
     s
+}
+
+/// The most line work items one `sheet_line` command adds.
+const MAX_LINES_PER_COMMAND: usize = 5_000;
+/// The most points one polyline holds.
+const MAX_LINE_POINTS: usize = 10_000;
+/// The most boundary pieces a trim or extend gathers from the viewports of a sheet.
+const MAX_BOUNDARY_PIECES: usize = 400_000;
+
+/// What a trim or extend found to cut to.
+struct Boundaries {
+    curves: Vec<linework::Curve>,
+    paper: usize,
+    model: usize,
+    frames: usize,
+    /// a viewport whose drawing couldn't be made (its model lines are not boundaries), or a cap that was hit
+    notes: Vec<String>,
+}
+
+impl Boundaries {
+    fn json(&self) -> Value {
+        json!({"paper": self.paper, "model_lines": self.model, "viewport_frames": self.frames, "notes": self.notes})
+    }
+}
+
+fn shape_z(k: &ItemKind) -> i32 {
+    match k {
+        ItemKind::Line(s) | ItemKind::Polyline(s) | ItemKind::Arc(s) | ItemKind::Rect(s) => s.z,
+        _ => 0,
+    }
+}
+
+impl Engine {
+    /// A line work item from what a command gave: for a new one, its sheet and points; for a change (`id`), the old
+    /// one with what was given put over it. Everything is checked here, so a bad one changes nothing.
+    fn line_from(&self, a: &LineArgs, fallback_sheet: Option<Id>) -> Result<(Option<Id>, ItemKind)> {
+        let old = match a.id {
+            Some(id) => match self.model.sheet_items.get(&id).map(|i| &**i) {
+                Some(SheetItem::Known(k @ (ItemKind::Line(_) | ItemKind::Polyline(_) | ItemKind::Arc(_) | ItemKind::Rect(_)))) => Some(k.clone()),
+                Some(other) => bail!("sheet item {id} is a {}, not paper line work", other.kind_name()),
+                None => bail!("no sheet item {id}"),
+            },
+            None => None,
+        };
+        let name = |k: &ItemKind| k.name();
+        let kind_name = match (&old, a.kind.as_deref()) {
+            (Some(o), Some(k)) if !k.eq_ignore_ascii_case(name(o)) => bail!("an item's kind stays as it is ({} stays a {}); delete it and add a {k} instead", a.id.unwrap_or(0), name(o)),
+            (Some(o), _) => name(o).to_string(),
+            (None, Some(k)) => k.to_ascii_lowercase(),
+            (None, None) => match a.pts_mm.as_ref().map(Vec::len) {
+                Some(2) => "line".into(),
+                Some(_) => "polyline".into(),
+                None => bail!("give `pts_mm` (and `sheet`) to add line work"),
+            },
+        };
+        let mut shape = match &old {
+            Some(ItemKind::Line(s) | ItemKind::Polyline(s) | ItemKind::Arc(s) | ItemKind::Rect(s)) => s.clone(),
+            _ => {
+                let Some(sheet) = a.sheet.or(fallback_sheet) else { bail!("give the `sheet` to add line work to") };
+                if !self.model.sheets.contains_key(&sheet) {
+                    bail!("no sheet {sheet}");
+                }
+                if a.pts_mm.is_none() {
+                    bail!("give `pts_mm` to add line work");
+                }
+                Shape { sheet, made_by: self.made_by(), ..Default::default() }
+            }
+        };
+        if let Some(p) = &a.pts_mm {
+            if p.len() > MAX_LINE_POINTS {
+                bail!("a polyline holds at most {MAX_LINE_POINTS} points");
+            }
+            if let Some(bad) = p.iter().position(|q| !q.iter().all(|x| x.is_finite() && x.abs() <= linework::MAX_COORD)) {
+                bail!("point {bad} is not a paper position (millimetres from the sheet's top left, within {} of it)", linework::MAX_COORD);
+            }
+            shape.pts_mm = p.clone();
+        }
+        if let Some(w) = a.w_mm {
+            if !(w.is_finite() && (WEIGHT_RANGE.0..=WEIGHT_RANGE.1).contains(&w)) {
+                bail!("w_mm is a pen width between {} and {} mm", WEIGHT_RANGE.0, WEIGHT_RANGE.1);
+            }
+            shape.pen.w_mm = w;
+        }
+        if let Some(c) = &a.color {
+            if crate::draft::ir::parse_hex(c).is_none() {
+                bail!("color is \"#rrggbb\"");
+            }
+            shape.pen.color = c.clone();
+        }
+        if let Some(d) = &a.dash_mm {
+            if d.len() > 16 || d.iter().any(|x| !(x.is_finite() && *x > 0.0 && *x <= 100.0)) {
+                bail!("dash_mm is up to 16 lengths (on, off, ...), each above 0 and at most 100 mm; [] for a solid line");
+            }
+            shape.pen.dash_mm = d.clone();
+        }
+        if let Some(z) = a.z {
+            shape.z = z;
+        }
+        let kind = match kind_name.as_str() {
+            "line" => ItemKind::Line(shape),
+            "polyline" => ItemKind::Polyline(shape),
+            "arc" => ItemKind::Arc(shape),
+            "rect" => ItemKind::Rect(shape),
+            other => bail!("kind is line, polyline, arc or rect (got {other:?})"),
+        };
+        // the shape has to hold together: the right number of points, a length, three points on a circle
+        linework::Chain::of(&kind)?;
+        Ok((a.id, kind))
+    }
+
+    /// The line work a trim or extend is about: the item, its chain, the place nearest the pick, and its sheet.
+    fn pick_line_work(&self, item: Id, at: [f64; 2], tol: Option<f64>) -> Result<(ItemKind, linework::Chain, f64, Id)> {
+        let Some(old) = self.model.sheet_items.get(&item) else { bail!("no sheet item {item}") };
+        let SheetItem::Known(kind @ (ItemKind::Line(_) | ItemKind::Polyline(_) | ItemKind::Arc(_) | ItemKind::Rect(_))) = &**old else {
+            bail!("sheet item {item} is a {}, not paper line work: only lines, polylines, arcs and rectangles on a sheet are trimmed, extended and offset (what a viewport draws of the model never is)", old.kind_name())
+        };
+        if !at.iter().all(|x| x.is_finite() && x.abs() <= linework::MAX_COORD) {
+            bail!("at_mm is a point on the sheet, in millimetres");
+        }
+        let tol = tol.unwrap_or(2.0);
+        if !(tol.is_finite() && tol > 0.0 && tol <= 50.0) {
+            bail!("pick_tol_mm is above 0 and at most 50");
+        }
+        let chain = linework::Chain::of(kind)?;
+        let (g, d) = chain.nearest(at);
+        if d > tol {
+            bail!("at_mm is {d:.2} mm from item {item}: pick a point on it (within {tol} mm)");
+        }
+        Ok((kind.clone(), chain, g, kind.sheet()))
+    }
+
+    /// What a trim or extend of `item` cuts to: the other line work on its sheet, the edges of the sheet's viewports,
+    /// and (when `use_model`) the lines each viewport draws of the model, cut to its frame.
+    fn boundaries(&self, sheet: Id, item: Id, use_model: bool) -> Boundaries {
+        let m = &self.model;
+        let mut b = Boundaries { curves: Vec::new(), paper: 0, model: 0, frames: 0, notes: Vec::new() };
+        let mut vps: Vec<(i32, Id, &Viewport)> = Vec::new();
+        for (id, i) in &m.sheet_items {
+            let SheetItem::Known(k) = &**i else { continue };
+            if k.sheet() != sheet {
+                continue;
+            }
+            match k {
+                ItemKind::Line(_) | ItemKind::Polyline(_) | ItemKind::Arc(_) | ItemKind::Rect(_) if *id != item => {
+                    if let Ok(c) = linework::Chain::of(k) {
+                        b.paper += c.curves.len();
+                        b.curves.extend(c.curves);
+                    }
+                }
+                ItemKind::Viewport(v) => vps.push((v.z, *id, v)),
+                _ => {}
+            }
+        }
+        vps.sort_by_key(|(z, id, _)| (*z, *id));
+        let sh = m.sheets.get(&sheet).map_or(297.0, |s| s.paper.h_mm);
+        let bm = crate::environment::without(m);
+        let mut pens = crate::draft::ir::Pens::new(false);
+        pens.world = Some(self.drawings.world());
+        for (_, id, v) in vps {
+            if v.rect_mm[2] <= 0.0 || v.rect_mm[3] <= 0.0 {
+                continue;
+            }
+            let fr = linework::frame(v.rect_mm);
+            b.frames += fr.len();
+            b.curves.extend(fr);
+            if !use_model {
+                continue;
+            }
+            let spec = viewport_to_spec(v);
+            match crate::draft::sheet::draw_viewports(m, &bm, std::slice::from_ref(&spec), &pens, sh, Some(&self.drawings), None).pop().unwrap_or_else(|| Err(anyhow::anyhow!("not drawn"))) {
+                Ok(prims) => {
+                    let mut flat: Vec<linework::Curve> = Vec::new();
+                    fn walk(items: &[crate::draft::ir::Prim], inside: bool, out: &mut Vec<linework::Curve>) {
+                        for p in crate::draft::ir::expanded(items).iter() {
+                            match p {
+                                crate::draft::ir::Prim::Group(g) => walk(&g.children, true, out),
+                                crate::draft::ir::Prim::Path(pp) if inside && pp.pen.is_some() => linework::flatten(&pp.segs, out),
+                                _ => {}
+                            }
+                        }
+                    }
+                    walk(&prims, false, &mut flat);
+                    for c in flat {
+                        if let Some(c) = linework::clip_to(&c, v.rect_mm) {
+                            if b.model >= MAX_BOUNDARY_PIECES {
+                                b.notes.push(format!("the model lines of viewport {id} were cut off at {MAX_BOUNDARY_PIECES} pieces"));
+                                break;
+                            }
+                            b.model += 1;
+                            b.curves.push(c);
+                        }
+                    }
+                }
+                Err(e) => b.notes.push(format!("viewport {id}'s model lines are not boundaries: {e}")),
+            }
+        }
+        b
+    }
 }

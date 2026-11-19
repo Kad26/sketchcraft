@@ -14,13 +14,25 @@ use glam::DVec3;
 // ---- plans -----------------------------------------------------------------------------
 
 /// Where a plan's content lies (meters): the cut, its dimension strings and callouts.
-fn plan_points(bm: &Model, v: &ViewportSpec, z: f64) -> Result<(Vec<(f64, f64)>, PlanExtras, f64)> {
-    let cut = bm.section(DVec3::new(0.0, 0.0, z), DVec3::new(0.0, 0.0, -1.0))?;
+/// `same`: the plan's own cut, when `bm` is the model itself (no environment to leave out), so it isn't cut twice.
+fn plan_points(bm: &Model, v: &ViewportSpec, z: f64, same: Option<&crate::section::Cut>) -> Result<(Vec<(f64, f64)>, PlanExtras, f64)> {
+    let own;
+    let cut = match same {
+        Some(c) => c,
+        None => {
+            own = bm.section(DVec3::new(0.0, 0.0, z), DVec3::new(0.0, 0.0, -1.0))?;
+            &own
+        }
+    };
     let mut pts: Vec<(f64, f64)> = cut.segments.iter().flat_map(|(a, b)| [(a.x, a.y), (b.x, b.y)]).collect();
     // dimension strings on this floor count toward the plan's size
     let floor = v.floor.unwrap_or(z - 1.22);
     pts.extend(dims_on_floor(bm, floor));
-    let extras = if v.callouts { plan_extras(bm, floor, z, !v.marks.is_empty()) } else { PlanExtras::default() };
+    let mut extras = if v.callouts { plan_extras(bm, floor, z, !v.marks.is_empty()) } else { PlanExtras::default() };
+    if v.no_auto_dims {
+        // the sheet has attached dimensions (`dimension_auto`) in their place
+        extras.dims.clear();
+    }
     pts.extend(extras.reach.iter().copied());
     Ok((pts, extras, floor))
 }
@@ -30,8 +42,8 @@ fn plan_points(bm: &Model, v: &ViewportSpec, z: f64) -> Result<(Vec<(f64, f64)>,
 pub(super) fn plan(cv: &mut Cv, m: &Model, bm: &Model, v: &ViewportSpec, z: f64, pens: &Pens) -> Result<(String, Option<f64>)> {
     let sh = cv.h_mm;
     let y = |mm: f64| (sh - mm) * PT;
-    let cut = m.section(DVec3::new(0.0, 0.0, z), DVec3::new(0.0, 0.0, -1.0))?;
-    let (pts, extras, floor) = plan_points(bm, v, z)?;
+    let cut = pens.section(m, DVec3::new(0.0, 0.0, z), DVec3::new(0.0, 0.0, -1.0))?;
+    let (pts, extras, floor) = plan_points(bm, v, z, std::ptr::eq(m, bm).then_some(&cut))?;
     if pts.is_empty() {
         bail!("nothing is cut at {z} m");
     }
@@ -51,19 +63,21 @@ pub(super) fn plan(cv: &mut Cv, m: &Model, bm: &Model, v: &ViewportSpec, z: f64,
     let to = |px: f64, py: f64| -> (f64, f64) { ((cx + (px - mx) * k) * PT, y(cy - (py - my) * k)) };
     let units = if m.units.is_empty() { "m" } else { m.units.as_str() };
     cv.clipped(v.x * PT, y(v.y + v.h), v.w * PT, v.h * PT, |cv| {
-        // cut walls: solid dark on paper; pale with white outlines on a blueprint; holes left open (even-odd)
-        let outline = pens.ink(pens.heavy);
-        for (_, outer, holes) in &cut.regions {
-            let mut segs = Vec::new();
-            for ring in std::iter::once(outer).chain(holes.iter()) {
-                for (i, p) in ring.iter().enumerate() {
-                    let (a, b) = to(p.x, p.y);
-                    let q = [a / PT, sh - b / PT];
-                    segs.push(if i == 0 { Seg::M(q) } else { Seg::L(q) });
-                }
-                segs.push(Seg::Z);
-            }
-            cv.push(Prim::Path(PathPrim { segs, pen: Some(outline.clone()), fill: Some(Fill { rgb: pens.cut_fill, even_odd: true }), prov: None }));
+        // cut walls: solid dark on paper; pale with white outlines on a blueprint; holes left open (even-odd);
+        // a tag's cut style fills its regions its own way (`cut_region`)
+        for r in &cut.regions {
+            let rings: Vec<Vec<[f64; 2]>> = std::iter::once(&r.outer)
+                .chain(r.holes.iter())
+                .map(|ring| {
+                    ring.iter()
+                        .map(|p| {
+                            let (a, b) = to(p.x, p.y);
+                            [a / PT, sh - b / PT]
+                        })
+                        .collect()
+                })
+                .collect();
+            cut_region(cv, m, r.tag.as_deref(), rings, sh, denom, pens);
         }
         // everything else the cut passes through (glass, frames): thin lines
         let thin = pens.ink(pens.thin);
@@ -73,7 +87,7 @@ pub(super) fn plan(cv: &mut Cv, m: &Model, bm: &Model, v: &ViewportSpec, z: f64,
         // what's below the cut on this floor, seen from above: stair treads, counters, fixtures
         // (finer and lighter than the cut)
         let faint = Pen::new(pens.hair, pens.faint());
-        for e in m.world_edges().into_iter().filter(|e| !e.soft) {
+        pens.with_edges(m, |edges| for e in edges.iter().filter(|e| !e.soft) {
             let (lo, hi) = (e.a.z.min(e.b.z), e.a.z.max(e.b.z));
             if lo < floor + 0.02 && hi < floor + 0.02 {
                 continue; // lying on the floor: the floor's own outline, not a thing on it
@@ -86,7 +100,7 @@ pub(super) fn plan(cv: &mut Cv, m: &Model, bm: &Model, v: &ViewportSpec, z: f64,
             }
             let pen = if e.tag.is_some() || e.draft.is_some() { pens.for_tag(&m.drafting, e.tag.as_deref(), e.draft.as_deref(), faint.clone(), false) } else { faint.clone() };
             cv.line(to(e.a.x, e.a.y), to(e.b.x, e.b.y), &pen);
-        }
+        });
         stairs(cv, m, pens, floor, &to);
         overhead(cv, m, pens, floor, z, &to);
         annotations(cv, m, pens, floor, units, &to);
@@ -142,6 +156,37 @@ pub(super) fn plan(cv: &mut Cv, m: &Model, bm: &Model, v: &ViewportSpec, z: f64,
         None => label,
     };
     Ok((label, Some(denom)))
+}
+
+/// One cut region (paper mm, y down; the outer ring, then its holes) of a plan or section at 1:`denom`, filled as its
+/// tag's cut style says (`TagStyle.cut`, design §3.4): the drawing's solid poché (no style), a solid colour, the
+/// paper colour with the tag's hatch over it, or the paper colour alone (`None`: a blank cut that still hides what is
+/// beyond it). Always with the cut outline on top, in the tag's outline pen (`Pens::for_cut`).
+fn cut_region(cv: &mut Cv, m: &Model, tag: Option<&str>, rings: Vec<Vec<[f64; 2]>>, sh: f64, denom: f64, pens: &Pens) {
+    use crate::drafting::CutFill;
+    let mut segs = Vec::new();
+    for ring in &rings {
+        for (i, q) in ring.iter().enumerate() {
+            segs.push(if i == 0 { Seg::M(*q) } else { Seg::L(*q) });
+        }
+        segs.push(Seg::Z);
+    }
+    let d = &m.drafting;
+    let outline = pens.for_cut(d, tag);
+    let fill = |rgb| Some(Fill { rgb, even_odd: true });
+    match (d.cut_fill(tag), d.cut_hatch(tag)) {
+        (CutFill::Hatch, Some(u)) => {
+            cv.push(Prim::Path(PathPrim { segs: segs.clone(), pen: None, fill: fill(pens.paper), prov: None }));
+            cv.push(Prim::Hatch(super::cache::hatch_on_sheet(d, u, rings, sh, denom, pens)));
+            cv.push(Prim::Path(PathPrim { segs, pen: Some(outline), fill: None, prov: None }));
+        }
+        (CutFill::None, _) => cv.push(Prim::Path(PathPrim { segs, pen: Some(outline), fill: fill(pens.paper), prov: None })),
+        (CutFill::Solid, _) => {
+            let own = tag.and_then(|t| d.tag_style(t)).and_then(|t| super::ir::parse_hex(&t.cut.color));
+            cv.push(Prim::Path(PathPrim { segs, pen: Some(outline), fill: fill(own.unwrap_or(pens.cut_fill)), prov: None }))
+        }
+        _ => cv.push(Prim::Path(PathPrim { segs, pen: Some(outline), fill: fill(pens.cut_fill), prov: None })),
+    }
 }
 
 /// Stairs: on the floor they start from, the treads up to the cut with UP; on the floor they arrive
@@ -323,22 +368,51 @@ fn standard_look(name: &str) -> DVec3 {
     -eye.normalize()
 }
 
-pub(super) fn view(cv: &mut Cv, m: &Model, bm: &Model, v: &ViewportSpec, pens: &Pens) -> Result<(String, Option<f64>)> {
-    let sh = cv.h_mm;
-    let y = |mm: f64| (sh - mm) * PT;
-    let mut label = v.label.clone().unwrap_or_else(|| v.view.clone());
+/// A section viewport's plane: its origin and the way it looks (from the far side of the plane).
+pub(crate) fn section_of(v: &ViewportSpec) -> Option<(DVec3, DVec3)> {
+    v.section.map(|s| (DVec3::new(s[0], s[1], s[2]), DVec3::new(s[3], s[4], 0.0).normalize_or_zero()))
+}
+
+/// Where a true elevation (or a section) is seen from: the way from the model toward the viewer.
+pub(crate) fn elev_dir_of(v: &ViewportSpec) -> Option<DVec3> {
+    if let Some((_, look)) = section_of(v) {
+        return Some(-look);
+    }
     // a true elevation: looking dead level at the side, from the middle
-    let elev_dir = match v.view.as_str() {
+    match v.view.as_str() {
         "front" => Some(DVec3::new(0.0, -1.0, 0.0)),
         "back" => Some(DVec3::new(0.0, 1.0, 0.0)),
         "left" => Some(DVec3::new(-1.0, 0.0, 0.0)),
         "right" => Some(DVec3::new(1.0, 0.0, 0.0)),
         _ => None,
     }
-    .filter(|_| v.callouts && v.scale.is_some());
-    // a section looks along `look` from the far side of its plane
-    let sec = v.section.map(|s| (DVec3::new(s[0], s[1], s[2]), DVec3::new(s[3], s[4], 0.0).normalize_or_zero()));
-    let elev_dir = if let Some((_, look)) = sec { Some(-look) } else { elev_dir };
+    .filter(|_| v.callouts && v.scale.is_some())
+}
+
+/// The way a scaled view looks, the point it is pinned to when it has no anchor (`center`: the middle of the
+/// building), and whether a saved view looked up by name decides it (so a change to the saved views can move it).
+pub(crate) fn look_of(m: &Model, v: &ViewportSpec, center: DVec3) -> (DVec3, DVec3, bool) {
+    if let Some((_, look)) = section_of(v) {
+        return (look, center, false);
+    }
+    if let Some(c) = &v.camera {
+        // a saved sheet's viewport with a camera of its own
+        return (DVec3::from(c.target) - DVec3::from(c.eye), DVec3::from(c.target), false);
+    }
+    if let Some(s) = m.views.iter().find(|s| s.name == v.view) {
+        return (DVec3::from(s.target) - DVec3::from(s.eye), DVec3::from(s.target), true);
+    }
+    match elev_dir_of(v) {
+        Some(dir) => (-dir, center, true),
+        None => (standard_look(&v.view), center, true),
+    }
+}
+
+pub(super) fn view(cv: &mut Cv, m: &Model, bm: &Model, v: &ViewportSpec, pens: &Pens) -> Result<(String, Option<f64>)> {
+    let sh = cv.h_mm;
+    let y = |mm: f64| (sh - mm) * PT;
+    let mut label = v.label.clone().unwrap_or_else(|| v.view.clone());
+    let (sec, elev_dir) = (section_of(v), elev_dir_of(v));
     let bounds = bm.world_bounds();
     let denom = match &v.scale {
         Some(s) => Some(scale_of(s)?),
@@ -352,20 +426,8 @@ pub(super) fn view(cv: &mut Cv, m: &Model, bm: &Model, v: &ViewportSpec, pens: &
         raster(cv, m, v, pens, sec, bounds, elev_dir);
         return Ok((label, denom));
     };
-    let saved = m.views.iter().find(|s| s.name == v.view);
     let center = bounds.map(|(lo, hi)| (lo + hi) / 2.0).unwrap_or(DVec3::ZERO);
-    let (look, auto_anchor) = if let Some((_, look)) = sec {
-        (look, center)
-    } else if let Some(c) = &v.camera {
-        // a saved sheet's viewport with a camera of its own
-        (DVec3::from(c.target) - DVec3::from(c.eye), DVec3::from(c.target))
-    } else if let Some(s) = saved {
-        (DVec3::from(s.target) - DVec3::from(s.eye), DVec3::from(s.target))
-    } else if let Some(dir) = elev_dir {
-        (-dir, center)
-    } else {
-        (standard_look(&v.view), center)
-    };
+    let (look, auto_anchor, _) = look_of(m, v, center);
     if look.length_squared() < 1e-12 {
         bail!("the view \"{}\" looks at nothing", v.view);
     }
@@ -373,24 +435,18 @@ pub(super) fn view(cv: &mut Cv, m: &Model, bm: &Model, v: &ViewportSpec, pens: &
     let k = 1000.0 / d;
     let proj = Proj::new(anchor, look, k, [v.x + v.w / 2.0, v.y + v.h / 2.0]);
     let rect = [v.x, v.y, v.w, v.h];
-    let hv = View { m, proj: proj.clone(), rect, clip: sec, beyond: v.beyond, pens, inject_panic: false };
+    let hv = View { m, proj: proj.clone(), rect, clip: sec, beyond: v.beyond, pens, inject_panic: false, cover: true };
     let lines = hv.lines()?;
     cv.clipped(v.x * PT, y(v.y + v.h), v.w * PT, v.h * PT, |cv| {
         cv.out.extend(lines);
         // a section: what the plane cuts through, filled solid over the picture
         if let Some((origin, look)) = sec {
-            if let Ok(cut) = m.section(origin, look) {
+            if let Ok(cut) = pens.section(m, origin, look) {
                 // the cut is drawn in the same frame as the lines
                 let to = |p: DVec3| proj.xy(p);
-                for (_, outer, holes) in &cut.regions {
-                    let mut segs = Vec::new();
-                    for ring in std::iter::once(outer).chain(holes.iter()) {
-                        for (i, p) in ring.iter().enumerate() {
-                            segs.push(if i == 0 { Seg::M(to(*p)) } else { Seg::L(to(*p)) });
-                        }
-                        segs.push(Seg::Z);
-                    }
-                    cv.push(Prim::Path(PathPrim { segs, pen: Some(pens.ink(pens.heavy)), fill: Some(Fill { rgb: pens.cut_fill, even_odd: true }), prov: None }));
+                for r in &cut.regions {
+                    let rings: Vec<Vec<[f64; 2]>> = std::iter::once(&r.outer).chain(r.holes.iter()).map(|ring| ring.iter().map(|p| to(*p)).collect()).collect();
+                    cut_region(cv, m, r.tag.as_deref(), rings, sh, d, pens);
                 }
                 let thin = pens.ink(pens.thin);
                 for (a, b) in &cut.segments {
@@ -456,5 +512,5 @@ fn raster(cv: &mut Cv, m: &Model, v: &ViewportSpec, pens: &Pens, sec: Option<(DV
         }
     }
     let img = render::render(m, &o);
-    cv.push(Prim::Group(Group { clip: Some([v.x, v.y, v.w, v.h]), alt: None, children: vec![Prim::Image(ImagePrim { rgb: std::sync::Arc::new(img), rect: [v.x, v.y, v.w, v.h] })] }));
+    cv.push(Prim::Group(Group { clip: Some([v.x, v.y, v.w, v.h]), alt: None, opacity: 1.0, children: std::sync::Arc::new(vec![Prim::Image(ImagePrim { rgb: std::sync::Arc::new(img), rect: [v.x, v.y, v.w, v.h] })]) }));
 }

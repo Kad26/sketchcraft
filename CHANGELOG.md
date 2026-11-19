@@ -6,7 +6,152 @@ What changed in each SketchCraft release, newest first. The format follows
 
 ## [Unreleased]
 
+## [0.3.8] - 2026-11-18
+
 ### Added
+- **Big drawing sets use far less memory and redraw faster.** The 52-page A1 permit set (about 200,000 faces) missed two
+  of its budgets the first time it was measured: it peaked at 1.94 GB of memory (budget 1.5 GB) and its slowest drawing
+  took 1.06 s to redraw after a wall moved (budget 1 s). Drawings kept for the pages now hold their plain lines packed
+  (about a fifth of the memory, 92 MB instead of 540 MB for the set), and the hidden-line views skip the work for
+  anything certainly hidden behind a big wall. The drawings, PDF, SVG and DXF files come out exactly the same as before.
+
+### Fixed
+- **Changes the app groups together now undo in one step.** When the app sent several changes as one group (reordering
+  the intersection priorities of several tags, for example), the first change closed the group, so Undo had to be
+  pressed once per change. A group of changes from one source is now one Undo and one Redo. Groups stay apart by
+  source: an agent's group, the app's own group and a plugin's run never mix, a group that is left open is closed on its
+  own, and opening a group inside a group or closing one that isn't open now says so. Agents can group their commands
+  too, so a whole AI answer can be taken back with a single Undo while your own edits stay their own steps.
+- **SketchUp 2013 to 2020 files with curves, pictures or text labels import again.** A SketchUp 2016 model (the
+  "SpeedyBee" file from #1) was refused as damaged because SketchCraft stopped at the control points a Bézier curve
+  keeps in its attributes; it also could not read the model's pictures (now placed like components) or its text labels
+  (found and counted among the annotations left out, not placed). Parts that were turned (a quarter turn about an
+  axis, say) in these files also came in turned the wrong way, so they sat scattered; they now sit where SketchUp has
+  them, as the same fix already did for newer files. On that file the import now gives about 5,000 faces, 25,200 edges
+  and 377 placements, against 4,990, 25,140 and 377 in SketchUp 2026's re-save. Dimensions in large classic files
+  (over 32,767 objects) are read correctly too. (part of #70)
+- Security: hardened limits on sheets, tables, rendering and imported text (WildLeopard).
+
+### Added
+- **Tables and text blocks on sheets.** A Table tool (B) in Layout: click for a table, or drag the size you want, and
+  type straight into its cells (Tab goes across, Enter goes down, Alt+Enter starts a new line in a cell); double-click
+  any cell to change it. Paste rows copied from a spreadsheet (or comma-separated text, quotes and all) onto the page
+  for a new table, or into a picked table from the cell you clicked; it grows to fit. The inspector sets a title, adds
+  and removes rows and columns, the header rows and a bold first column, the borders (grid, rules, outline or none),
+  the text height, each column's width and the alignment. "Drawing index" fills a table with every sheet's number and
+  name and keeps it up to date. Drag across with the Text tool for a text block whose paragraphs wrap to its width,
+  left, centred or right aligned. Tables and text blocks print in the PDF (each table a real table for screen
+  readers), SVG and DXF, are saved with the model, and every edit is one Undo. A 200-row schedule or a page of notes
+  stays quick. Agents can make them too (`sheet_table`, `sheet_table_paste`, `sheet_text` with `width_mm`).
+  (part of #7)
+- **Lay out a sheet entirely by mouse.** Layout has a tool bar down the left of the paper: Select, Viewport, Line,
+  Polyline, Rectangle, Arc, Text, Dimension, Trim, Extend, Offset and Delete, each with a key (V, W, L, P, R, A, T, D,
+  X, E, O, K), its icon as the cursor, and a hint under the paper saying what to do next. Drag a frame with Viewport
+  and pick what it shows (a floor plan, an elevation, a 3D view or a saved scene). With Select, drag a view to move it
+  and its eight handles to resize it; arrow keys nudge it (Shift for a grid step), and the scale is set on the right.
+  Everything snaps, with a marker saying to what: the paper grid (5 mm, or your own size; it can be turned off), the
+  page's edges, margin and middle, the edges and middles of other views and the title block, the ends and middles of
+  lines, and the model's corners and middles. Dimensions attach to the model: click its points, keep clicking to make
+  a chain, Shift for a baseline set, and Enter or a double-click puts the line where the mouse is (Auto, Horizontal,
+  Vertical or Aligned at the top). Text: click and type; double-click text to change it. Trim shows in red what a click
+  would cut away (Shift extends instead), Extend shows where a line would run to, and Offset shows the copy and its
+  distance (or type one). Double-click the title block to type the project or the page's name on the page. Escape
+  cancels a step, every gesture is one Undo step, and it is all saved in the model. Everything on the page can be
+  reached with Tab and the arrow keys, with a label for screen readers. Agents get `sheet_text` (paper text) and
+  `preview: true` on `sheet_trim` and `sheet_extend`. (part of #9)
+- **A Layout workspace for drawing sheets.** A fifth workspace, Layout, beside Model, Arch, Design and Previz. Pages
+  are on the left: add, duplicate, rename (double-click or F2) and delete them, and drag them into order (or the
+  arrows, or Alt+Up and Alt+Down). Each is one Undo step. The page you pick is in the middle, drawn on paper exactly
+  as the PDF draws it: scroll to zoom, drag to pan, Fit to see the whole page. Click a view on the page to change it on
+  the right: its caption, what it shows, its scale (1:50, or imperial like 1/4"=1'-0"), and an **opacity slider**
+  from 0 to 100%, for tracing one view over another (#6). With no view picked, the right side has the page: its name,
+  number, paper size, the title block's project and notes, and "Add view" to put a plan, an elevation or a 3D view
+  on it. Your 3D model stays open underneath while you're there, so switching back is instant and the camera,
+  selection and tool are as you left them. File > Open in Layout, the Arch strip's Layout button and the Drawing
+  sheets dialog take you there. Agents get `sheet_ir` (a page's drawing as data), `sheet_duplicate` and
+  `sheet_order`. (part of #63)
+- **Cut intersection priority per tag: the wall wins where it runs into the slab.** When the cut surfaces of two tags
+  overlap in a plan or a section (a wall into a slab, insulation inside a wall), the tag with the higher priority
+  keeps the overlap and the other stops at its edge, with no seam. Cuts of one tag, or of tags with the same priority,
+  join into one shape. In the Outliner, under Tags, "Intersection priority" lists the tags with the winner on top:
+  drag to reorder, use the arrows (or Alt+Up and Alt+Down on a row), or type a number from 0 to 999. It shows on
+  screen and on sheets (PDF, SVG, DXF), and agents set it with `tag_style {cut: {priority}}`. With every priority at
+  0, which is the default, drawings look as they did. Suggested by a Reddit user. (part of #88)
+- **Ask an agent to draw the sheets: lay out a permit set, dimension the plans, hatch, check.** `layout_preset`
+  makes a permit set of ordinary saved sheets in one Undo step: a cover with the sheet index and a 3D view, a plan
+  per floor, the four elevations, a section through the stairs (when there are stairs) and the door and window
+  schedule, numbered G-001, A-101, A-201, A-301 and A-601, on the paper and at the scale you ask for. It refuses an
+  empty model. `dimension_auto` puts attached chain dimensions on a plan, worked out the way the blueprint's are:
+  the overall width and depth, a chain through both sides of every door and window, every wall face across the
+  building, and column centres and guide points as grids. They follow the walls when you move them, a re-run never
+  doubles them, and dimensions it didn't make are never touched. `viewport_points` lists what a drawing can be
+  dimensioned to, with where each point is on the paper, and `sheet_render` (or the agent's render tool with a
+  sheet) shows a sheet as a picture so an agent can look at its own work. The agent help now has a short drafting
+  recipe: inspect, lay out, dimension, hatch by tag, render to check, fix. Each step is one Undo. (part of #10)
+- **Hatches on screen at their true weight.** When a section plane cuts a tagged wall, its hatch is now painted by
+  the graphics card: lines as thick on screen as the hatch's pen weight says (0.35 mm draws wider than 0.13 mm, 6
+  pixels per paper millimetre, as edges and cut outlines are), with its dashes and dots, and no limit on how many
+  lines a big or finely hatched cut can have (it used to stop at 60,000 lines and fill the rest with a flat tint).
+  A pattern with more than 16 line families falls back to the old lines. (part of #8)
+- **Big drawing sets stay fast.** SketchCraft now keeps each viewport's drawing once it has been drawn, and only
+  redraws the ones a change can reach: move one wall in a 52-page A1 set and the plans, elevations and sections that
+  show it are redrawn (30 of its 70 viewports in our test set), while everything else, and every page whose only
+  change is a dimension, a line or a text, comes straight from what was kept. Hatches are kept per region too, so a
+  redrawn plan reuses the hatching of the walls that didn't move. Nothing is drawn when a file opens; pages are
+  drawn when you look at them or export. The pages you looked at last are redrawn in the background after a change,
+  using at most two threads, and a result is thrown away if the model changed while it was being drawn, so nothing
+  out of date is ever shown or exported. Memory for kept drawings is capped (1 GB), least recently used first. A
+  set can now have up to 200 pages (it was 50). `drafting_status` tells the editor, agents and plugins how the kept
+  drawings stand. A benchmark of a 52-page A1 permit set (about 200,000 faces, 2,000 dimensions, 400 text blocks,
+  hatches on 8 tags) checks the timings against a budget on every release candidate and nightly. A saved viewport is
+  now drawn exactly where its anchor says (it was re-centred on the building on every export, while its dimensions
+  used the anchor). (part of #8)
+- **Line work on sheets: draw, trim, extend and offset.** A sheet can hold plain lines, polylines, arcs and
+  rectangles (`sheet_line`: a pen weight in paper millimetres, a colour, optional dashes), drawn in the PDF, SVG and
+  DXF. `sheet_trim` cuts away the span you pick between the nearest places other things cross it: the other line work
+  on the sheet, the lines a viewport draws of your model, and the edges of viewports. A span in the middle leaves two
+  pieces, one at the end leaves one, and a rectangle opens into a polyline. The model's own lines are only ever
+  boundaries, never cut. `sheet_extend` runs the end nearest your pick on, along the line (or round the circle for an
+  arc), to the next boundary. `sheet_offset` makes a parallel copy: lines move over, polylines get mitred corners,
+  arcs get a bigger or smaller radius, rectangles grow or shrink. When there is nothing to trim to or extend to, or a
+  distance would collapse the shape, the command says so and changes nothing. Each one is a single Undo step, and
+  agents and plugins can use them. There is no mouse editor for these yet (that is the sheet editor, #9); this is the
+  engine and the commands it will use. A chain of dimensions was already one command: `sheet_dim` with more than two
+  points measures every span in one go (or every span from the first point, as a baseline set), and is now written up
+  in the agent help. (part of #19)
+- **Dimensions from SketchUp files stay attached.** A dimension imported from a SketchUp file now holds on to the
+  corners or edges it measures, so when you move a wall the dimension moves with it and shows the new length; undo
+  puts both back in one step. An end that sits on nothing (within a thousandth of an inch, SketchUp's own tolerance)
+  keeps its fixed point, and the import tells you how many dimensions attached and how many didn't. SketchUp text
+  labels and screen texts are now read fully: they are still left out of the model (no sample file shows where a
+  label's text sits against its leader), but the import counts them and lists their words so you can add them back.
+  A file that holds only a screen text opens instead of being refused. Models with attached dimensions save in the
+  0.3.8 file format (0.3.7 opens them read-only); dimensions you drew yourself, and older files, are unchanged.
+  (part of #59)
+- **Cut fill per tag.** Where a plan or section cuts something, each tag now decides how its cut looks: the usual
+  dark fill, a solid colour of your choice, its hatch, or nothing at all (just the outline), with its own outline
+  thickness. A section through walls, a slab and furniture on different tags shows each its own way, on drawing sheets
+  (PDF, SVG and DXF) and on screen with a section plane. In the Outliner's Tags list, the new Cut button next to Hatch
+  shows a swatch of the fill and opens the choices, each with a hint. A cut takes the tag of the innermost tagged
+  group or component around it, so a tagged part inside a component (the glass in a desk) keeps its own fill. It is
+  saved with the model and undoes in one step; agents and plugins can set it with `tag_style {cut}`. (part of #5)
+- **Dimensions follow a group's copies.** When you group faces that share corners with other geometry, the group gets
+  its own copy of those corners. A dimension on a sheet now moves onto the copies when everything it measures went
+  into the group, so it stays with the group when you move it; a dimension that also measures something left outside
+  stays where it was. It is one undo step with the group, and redo brings it back. (part of #18)
+- **Hatch patterns per tag.** In the Outliner's Tags list, each tag has a Hatch button: pick a pattern and its walls
+  are hatched wherever a plan or section cuts them, on drawing sheets (PDF, SVG and DXF) and on screen with a section
+  plane. Set the hatch's colour, line thickness, scale and angle, and whether its size is fixed on paper or real size
+  in the model. Eleven patterns come built in (diagonal, cross, steel, grid, dots, brick, concrete, earth,
+  insulation, wood, sand), drawn by us and free to use (CC0), and **Import .pat…** loads AutoCAD-format `.pat` files,
+  which are kept in the model so it opens the same anywhere. In a DXF the hatch stays a real hatch your CAD program can
+  edit. A pattern too fine for its region prints as a light tint, and the export says so. Agents and plugins can do
+  the same with `tag_style {hatch}`, `hatch_pattern` and `hatch_patterns`. (part of #4)
+- **A viewport on a sheet can be faded.** Give a viewport an opacity from 0 to 1 (`viewport_edit` with `opacity`, or when
+  you add it) and, in the PDF, it prints as one see-through drawing: lines that cross inside it don't darken each
+  other, and viewports stacked on one another blend in the order they are stacked. SVG keeps the fade too. DXF has no
+  opacity, so those viewports are drawn at full strength and the export result says so in `warnings`. A faded 3D
+  view over a vector plan ("hybrid") isn't drawn yet. (part of #6)
 - **Dimensions come in from SketchUp files.** Importing a SketchUp 6 to 2020 file now brings its linear dimensions
   along as dimensions on the model, measured between the same two points and drawn at the same offset; a dimension
   whose text was typed over (not the measured length) also gets a text label. Radial dimensions, free text labels with
@@ -493,7 +638,8 @@ The first build with installers (never published as a release).
   import and export, and PNG renders with dimensions and labels.
 - Installers for macOS, Windows and Linux, and the CLI for each.
 
-[Unreleased]: https://github.com/jasonsutter87/sketchcraft/compare/v0.3.7...HEAD
+[Unreleased]: https://github.com/jasonsutter87/sketchcraft/compare/v0.3.8...HEAD
+[0.3.8]: https://github.com/jasonsutter87/sketchcraft/compare/v0.3.7...v0.3.8
 [0.3.7]: https://github.com/jasonsutter87/sketchcraft/compare/v0.3.6...v0.3.7
 [0.3.6]: https://github.com/jasonsutter87/sketchcraft/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/jasonsutter87/sketchcraft/compare/v0.3.4...v0.3.5

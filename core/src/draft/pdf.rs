@@ -6,6 +6,7 @@ use super::font;
 use super::ir::*;
 use anyhow::{bail, Result};
 use pdf_writer::types::{CidFontType, FontFlags, LineCapStyle, LineJoinStyle, StructRole, SystemInfo, TabOrder, UnicodeCmap};
+use pdf_writer::writers::Resources;
 use pdf_writer::{Content, Filter, Finish, Name, Pdf, Rect, Ref, Str, TextStr};
 use std::collections::BTreeMap;
 use subsetter::GlyphRemapper;
@@ -21,6 +22,7 @@ struct Face {
 
 struct Ctx {
     faces: Vec<Option<Face>>,
+    font_refs: Vec<Ref>,
     next: i32,
 }
 
@@ -48,13 +50,17 @@ fn f(v: f64) -> f32 {
 struct Tag {
     role: StructRole,
     alt: Option<String>,
-    cell: Option<(u16, u16)>,
+    /// (table, row, column)
+    cell: Option<(u16, u16, u16)>,
 }
 
 struct PageOut {
     content: Vec<u8>,
     fonts: Vec<usize>,
     images: Vec<(usize, Ref)>,
+    /// transparency groups drawn on the page: Fm names, and the ExtGState (Gs names) that fades each
+    forms: Vec<(usize, Ref)>,
+    gstates: Vec<(usize, Ref)>,
     /// the structure each marked-content id (0..n) belongs to: role, and a figure's description
     tags: Vec<Tag>,
 }
@@ -65,8 +71,36 @@ struct Writer<'a> {
     page_h: f64,
     fonts: Vec<usize>,
     images: Vec<(usize, Ref)>,
+    forms: Vec<(usize, Ref)>,
+    gstates: Vec<(usize, Ref)>,
     tags: Vec<Tag>,
     in_figure: bool,
+    page_w: f64,
+}
+
+/// The fonts, pictures and transparency groups a content stream (a page or a form) draws, as its resources.
+fn resources(res: &mut Resources, font_refs: &[Ref], fonts: &[usize], images: &[(usize, Ref)], forms: &[(usize, Ref)], gstates: &[(usize, Ref)]) {
+    if !fonts.is_empty() {
+        let mut fd = res.fonts();
+        for i in fonts {
+            fd.pair(Name(format!("F{i}").as_bytes()), font_refs[*i]);
+        }
+    }
+    if !images.is_empty() || !forms.is_empty() {
+        let mut xd = res.x_objects();
+        for (n, r) in images {
+            xd.pair(Name(format!("Im{n}").as_bytes()), *r);
+        }
+        for (n, r) in forms {
+            xd.pair(Name(format!("Fm{n}").as_bytes()), *r);
+        }
+    }
+    if !gstates.is_empty() {
+        let mut gd = res.ext_g_states();
+        for (n, r) in gstates {
+            gd.pair(Name(format!("Gs{n}").as_bytes()), *r);
+        }
+    }
 }
 
 impl Writer<'_> {
@@ -75,6 +109,29 @@ impl Writer<'_> {
     }
     fn y(&self, mm: f64) -> f32 {
         f((self.page_h - mm) * PT)
+    }
+
+    /// One packed line (`Prim::Lines`): exactly what `path` writes for a stroked `M`, `L` path with no fill.
+    fn line(&mut self, a: [f64; 2], b: [f64; 2], pen: &Pen) {
+        self.c.save_state();
+        self.stroke_pen(pen);
+        let (x, y) = (self.x(a[0]), self.y(a[1]));
+        self.c.move_to(x, y);
+        let (x, y) = (self.x(b[0]), self.y(b[1]));
+        self.c.line_to(x, y);
+        self.c.stroke();
+        self.c.restore_state();
+    }
+
+    fn stroke_pen(&mut self, pen: &Pen) {
+        self.c.set_stroke_rgb(pen.rgb[0] as f32 / 255.0, pen.rgb[1] as f32 / 255.0, pen.rgb[2] as f32 / 255.0);
+        self.c.set_line_width(f(pen.w * PT));
+        if pen.dash.is_empty() {
+            self.c.set_line_cap(LineCapStyle::RoundCap).set_line_join(LineJoinStyle::RoundJoin);
+        } else {
+            self.c.set_line_cap(LineCapStyle::ButtCap).set_line_join(LineJoinStyle::MiterJoin);
+            self.c.set_dash_pattern(pen.dash.iter().map(|d| f(d * PT)), 0.0);
+        }
     }
 
     fn path(&mut self, p: &PathPrim) {
@@ -86,14 +143,7 @@ impl Writer<'_> {
             self.c.set_fill_rgb(fl.rgb[0] as f32 / 255.0, fl.rgb[1] as f32 / 255.0, fl.rgb[2] as f32 / 255.0);
         }
         if let Some(pen) = &p.pen {
-            self.c.set_stroke_rgb(pen.rgb[0] as f32 / 255.0, pen.rgb[1] as f32 / 255.0, pen.rgb[2] as f32 / 255.0);
-            self.c.set_line_width(f(pen.w * PT));
-            if pen.dash.is_empty() {
-                self.c.set_line_cap(LineCapStyle::RoundCap).set_line_join(LineJoinStyle::RoundJoin);
-            } else {
-                self.c.set_line_cap(LineCapStyle::ButtCap).set_line_join(LineJoinStyle::MiterJoin);
-                self.c.set_dash_pattern(pen.dash.iter().map(|d| f(d * PT)), 0.0);
-            }
+            self.stroke_pen(pen);
         }
         for s in &p.segs {
             match *s {
@@ -136,6 +186,55 @@ impl Writer<'_> {
                 self.c.end_path();
             }
         }
+        self.c.restore_state();
+    }
+
+    /// A hatched region: clipped to the region (even-odd), its lines stroked with round caps (a dot is a
+    /// zero-length line); or the tint, filled, when it has one.
+    fn hatch(&mut self, h: &HatchPrim) {
+        let segs = h.ring_segs();
+        if segs.is_empty() || (h.tint.is_none() && h.lines.is_empty()) {
+            return;
+        }
+        self.c.save_state();
+        let ring = |w: &mut Self| {
+            for s in &segs {
+                match *s {
+                    Seg::M(a) => {
+                        let (x, y) = (w.x(a[0]), w.y(a[1]));
+                        w.c.move_to(x, y);
+                    }
+                    Seg::L(a) => {
+                        let (x, y) = (w.x(a[0]), w.y(a[1]));
+                        w.c.line_to(x, y);
+                    }
+                    Seg::Z => {
+                        w.c.close_path();
+                    }
+                    Seg::C(..) => {}
+                }
+            }
+        };
+        if let Some(t) = h.tint {
+            self.c.set_fill_rgb(t[0] as f32 / 255.0, t[1] as f32 / 255.0, t[2] as f32 / 255.0);
+            ring(self);
+            self.c.fill_even_odd();
+            self.c.restore_state();
+            return;
+        }
+        ring(self);
+        self.c.clip_even_odd();
+        self.c.end_path();
+        let p = &h.pen;
+        self.c.set_stroke_rgb(p.rgb[0] as f32 / 255.0, p.rgb[1] as f32 / 255.0, p.rgb[2] as f32 / 255.0);
+        self.c.set_line_width(f(p.w * PT));
+        self.c.set_line_cap(LineCapStyle::RoundCap).set_line_join(LineJoinStyle::RoundJoin);
+        for [a, b] in &h.lines {
+            let (ax, ay, bx, by) = (self.x(a[0]), self.y(a[1]), self.x(b[0]), self.y(b[1]));
+            self.c.move_to(ax, ay);
+            self.c.line_to(bx, by);
+        }
+        self.c.stroke();
         self.c.restore_state();
     }
 
@@ -192,6 +291,58 @@ impl Writer<'_> {
         Ok(())
     }
 
+    /// A group that shows through: drawn into a Form XObject with an isolated transparency group (so what
+    /// overlaps inside it doesn't darken), placed through an ExtGState with the stroke and fill alpha.
+    /// It sits in the page's stream where it comes, so stacked groups blend in z order.
+    fn faded(&mut self, g: &Group, pdf: &mut Pdf) -> Result<()> {
+        let outer = (
+            std::mem::replace(&mut self.c, Content::new()),
+            std::mem::take(&mut self.fonts),
+            std::mem::take(&mut self.images),
+            std::mem::take(&mut self.forms),
+            std::mem::take(&mut self.gstates),
+        );
+        // the form's content is part of the figure around it (tagged content doesn't go inside a form)
+        let was_figure = std::mem::replace(&mut self.in_figure, true);
+        if let Some([x, y, w, h]) = g.clip {
+            self.c.rect(self.x(x), self.y(y + h), f(w * PT), f(h * PT));
+            self.c.clip_nonzero();
+            self.c.end_path();
+        }
+        let r = self.prims(&g.children, pdf);
+        self.in_figure = was_figure;
+        let inner = std::mem::replace(&mut self.c, outer.0);
+        let fonts = std::mem::replace(&mut self.fonts, outer.1);
+        let images = std::mem::replace(&mut self.images, outer.2);
+        let forms = std::mem::replace(&mut self.forms, outer.3);
+        let gstates = std::mem::replace(&mut self.gstates, outer.4);
+        r?;
+        let (form, gs) = (self.cx.alloc(), self.cx.alloc());
+        let data = zlib(&inner.finish())?;
+        let mut x = pdf.form_xobject(form, &data);
+        x.bbox(Rect::new(0.0, 0.0, f(self.page_w * PT), f(self.page_h * PT)));
+        x.filter(Filter::FlateDecode);
+        x.group().transparency().isolated(true).knockout(false).color_space().device_rgb();
+        resources(&mut x.resources(), &self.cx.font_refs, &fonts, &images, &forms, &gstates);
+        x.finish();
+        let a = f(g.opacity.max(0.0));
+        pdf.ext_graphics(gs).stroking_alpha(a).non_stroking_alpha(a);
+        let n = self.forms.len() + 1;
+        self.forms.push((n, form));
+        self.gstates.push((n, gs));
+        // a form's fonts are the page's fonts too (the list says which faces the page needs)
+        for i in fonts {
+            if !self.fonts.contains(&i) {
+                self.fonts.push(i);
+            }
+        }
+        self.c.save_state();
+        self.c.set_parameters(Name(format!("Gs{n}").as_bytes()));
+        self.c.x_object(Name(format!("Fm{n}").as_bytes()));
+        self.c.restore_state();
+        Ok(())
+    }
+
     fn prims(&mut self, items: &[Prim], pdf: &mut Pdf) -> Result<()> {
         for p in items {
             match p {
@@ -212,7 +363,7 @@ impl Writer<'_> {
                         Role::Heading2 => (StructRole::H2, None),
                         Role::Heading3 => (StructRole::H3, None),
                         Role::Caption => (StructRole::Caption, None),
-                        Role::Cell { row, col, header } => (if header { StructRole::TH } else { StructRole::TD }, Some((row, col))),
+                        Role::Cell { table, row, col, header } => (if header { StructRole::TH } else { StructRole::TD }, Some((table, row, col))),
                     };
                     // inside a figure the text is part of the figure's one tagged sequence (tagged content
                     // never nests); it still extracts as text
@@ -235,6 +386,15 @@ impl Writer<'_> {
                     self.text(t);
                     self.c.end_marked_content();
                 }
+                Prim::Hatch(h) => {
+                    if self.in_figure {
+                        self.hatch(h);
+                    } else {
+                        self.c.begin_marked_content(Name(b"Artifact"));
+                        self.hatch(h);
+                        self.c.end_marked_content();
+                    }
+                }
                 Prim::Image(i) => {
                     if self.in_figure {
                         self.image(i, pdf)?;
@@ -253,17 +413,35 @@ impl Writer<'_> {
                         self.c.begin_marked_content_with_properties(Name(b"Figure")).properties().identify(mcid);
                         self.in_figure = true;
                     }
-                    self.c.save_state();
-                    if let Some([x, y, w, h]) = g.clip {
-                        self.c.rect(self.x(x), self.y(y + h), f(w * PT), f(h * PT));
-                        self.c.clip_nonzero();
-                        self.c.end_path();
+                    if g.opacity < 1.0 {
+                        self.faded(g, pdf)?;
+                    } else {
+                        self.c.save_state();
+                        if let Some([x, y, w, h]) = g.clip {
+                            self.c.rect(self.x(x), self.y(y + h), f(w * PT), f(h * PT));
+                            self.c.clip_nonzero();
+                            self.c.end_path();
+                        }
+                        self.prims(&g.children, pdf)?;
+                        self.c.restore_state();
                     }
-                    self.prims(&g.children, pdf)?;
-                    self.c.restore_state();
                     if figure {
                         self.c.end_marked_content();
                         self.in_figure = false;
+                    }
+                }
+                // each line as its path would be written
+                Prim::Lines(l) => {
+                    for i in 0..l.len() {
+                        let [a, b] = l.ends[i];
+                        let pen = &l.pens[l.pen[i] as usize];
+                        if self.in_figure {
+                            self.line(a, b, pen);
+                        } else {
+                            self.c.begin_marked_content(Name(b"Artifact"));
+                            self.line(a, b, pen);
+                            self.c.end_marked_content();
+                        }
                     }
                 }
             }
@@ -283,19 +461,20 @@ pub fn write(doc: &Doc) -> Result<Vec<u8>> {
     let mut pdf = Pdf::new();
     let catalog = Ref::new(1);
     let tree = Ref::new(2);
-    let mut cx = Ctx { faces: (0..4).map(|_| None).collect(), next: 3 };
+    let mut cx = Ctx { faces: (0..4).map(|_| None).collect(), font_refs: Vec::new(), next: 3 };
     let font_refs: Vec<Ref> = (0..4).map(|_| cx.alloc()).collect();
+    cx.font_refs = font_refs.clone();
     let mut kids = Vec::new();
     let mut outs: Vec<(Ref, Ref, PageOut, [f64; 2])> = Vec::new();
     for page in &doc.pages {
-        let mut w = Writer { c: Content::new(), cx: &mut cx, page_h: page.h, fonts: Vec::new(), images: Vec::new(), tags: Vec::new(), in_figure: false };
+        let mut w = Writer { c: Content::new(), cx: &mut cx, page_h: page.h, fonts: Vec::new(), images: Vec::new(), forms: Vec::new(), gstates: Vec::new(), tags: Vec::new(), in_figure: false, page_w: page.w };
         if let Some(bg) = page.bg {
             w.c.set_fill_rgb(bg[0] as f32 / 255.0, bg[1] as f32 / 255.0, bg[2] as f32 / 255.0);
             w.c.rect(0.0, 0.0, f(page.w * PT), f(page.h * PT));
             w.c.fill_nonzero();
         }
         w.prims(&page.items, &mut pdf)?;
-        let out = PageOut { content: w.c.finish().to_vec(), fonts: w.fonts, images: w.images, tags: w.tags };
+        let out = PageOut { content: w.c.finish().to_vec(), fonts: w.fonts, images: w.images, forms: w.forms, gstates: w.gstates, tags: w.tags };
         let (pid, cid) = (cx.alloc(), cx.alloc());
         kids.push(pid);
         outs.push((pid, cid, out, [page.w, page.h]));
@@ -307,18 +486,7 @@ pub fn write(doc: &Doc) -> Result<Vec<u8>> {
         p.parent(tree).media_box(Rect::new(0.0, 0.0, f(w * PT), f(h * PT))).contents(*cid);
         p.struct_parents(page_no as i32).tab_order(TabOrder::StructureOrder);
         let mut res = p.resources();
-        if !out.fonts.is_empty() {
-            let mut fd = res.fonts();
-            for i in &out.fonts {
-                fd.pair(Name(format!("F{i}").as_bytes()), font_refs[*i]);
-            }
-        }
-        if !out.images.is_empty() {
-            let mut xd = res.x_objects();
-            for (n, r) in &out.images {
-                xd.pair(Name(format!("Im{n}").as_bytes()), *r);
-            }
-        }
+        resources(&mut res, &font_refs, &out.fonts, &out.images, &out.forms, &out.gstates);
         res.finish();
         p.finish();
     }
@@ -327,35 +495,58 @@ pub fn write(doc: &Doc) -> Result<Vec<u8>> {
     let (root, docelem, ptree) = (cx.alloc(), cx.alloc(), cx.alloc());
     let mut paragraphs: Vec<Vec<Ref>> = Vec::new();
     let mut parents: Vec<Vec<Ref>> = Vec::new();
-    let mut tables: Vec<Ref> = Vec::new();
     for (pid, _, out, _) in &outs {
-        let refs: Vec<Ref> = out.tags.iter().map(|_| cx.alloc()).collect();
-        // a page's schedule is a Table of rows of cells
-        let rows: std::collections::BTreeMap<u16, Ref> = out.tags.iter().filter_map(|t| t.cell).map(|(r, _)| (r, cx.alloc())).collect();
-        let table = (!rows.is_empty()).then(|| cx.alloc());
+        use std::collections::BTreeMap;
+        // a page's tables (schedules) are Tables of rows of cells; a cell's lines (several runs) are one cell
+        let mut cell_refs: BTreeMap<(u16, u16, u16), Ref> = BTreeMap::new();
+        let refs: Vec<Ref> = out.tags.iter().map(|t| match t.cell {
+            Some(c) => *cell_refs.entry(c).or_insert_with(|| cx.alloc()),
+            None => cx.alloc(),
+        }).collect();
+        let rows: BTreeMap<(u16, u16), Ref> = cell_refs.keys().map(|c| ((c.0, c.1), cx.alloc())).collect();
+        let tables: BTreeMap<u16, Ref> = rows.keys().map(|r| (r.0, cx.alloc())).collect();
         for (mcid, (r, t)) in refs.iter().zip(&out.tags).enumerate() {
-            let parent = t.cell.map_or(docelem, |(row, _)| rows[&row]);
+            if t.cell.is_some() {
+                continue;
+            }
             let mut e = pdf.struct_element(*r);
-            e.kind(t.role).parent(parent).page(*pid);
+            e.kind(t.role).parent(docelem).page(*pid);
             if let Some(a) = &t.alt {
                 e.alt(TextStr(a));
             }
             e.marked_content_child().marked_content_id(mcid as i32);
         }
-        if let Some(table) = table {
-            for (row, tr) in &rows {
-                let mut cells: Vec<(u16, Ref)> = out.tags.iter().zip(&refs).filter_map(|(t, r)| t.cell.filter(|c| c.0 == *row).map(|c| (c.1, *r))).collect();
-                cells.sort_by_key(|c| c.0);
-                let mut e = pdf.struct_element(*tr);
-                e.kind(StructRole::TR).parent(table).page(*pid);
-                e.insert(Name(b"K")).array().items(cells.iter().map(|c| c.1));
+        for (c, r) in &cell_refs {
+            let mcids: Vec<i32> = out.tags.iter().enumerate().filter(|(_, t)| t.cell == Some(*c)).map(|(i, _)| i as i32).collect();
+            let header = out.tags.iter().any(|t| t.cell == Some(*c) && t.role == StructRole::TH);
+            let mut e = pdf.struct_element(*r);
+            e.kind(if header { StructRole::TH } else { StructRole::TD }).parent(rows[&(c.0, c.1)]).page(*pid);
+            let mut k = e.children();
+            for m in mcids {
+                k.marked_content_id(m);
             }
-            let mut e = pdf.struct_element(table);
-            e.kind(StructRole::Table).parent(docelem).page(*pid);
-            e.insert(Name(b"K")).array().items(rows.values().copied());
-            tables.push(table);
         }
-        paragraphs.push(refs.iter().zip(&out.tags).filter(|(_, t)| t.cell.is_none()).map(|(r, _)| *r).chain(table).collect::<Vec<_>>());
+        for ((table, row), tr) in &rows {
+            let cells: Vec<Ref> = cell_refs.iter().filter(|(c, _)| c.0 == *table && c.1 == *row).map(|(_, r)| *r).collect();
+            let mut e = pdf.struct_element(*tr);
+            e.kind(StructRole::TR).parent(tables[table]).page(*pid);
+            e.insert(Name(b"K")).array().items(cells);
+        }
+        for (table, tref) in &tables {
+            let mut e = pdf.struct_element(*tref);
+            e.kind(StructRole::Table).parent(docelem).page(*pid);
+            e.insert(Name(b"K")).array().items(rows.iter().filter(|(r, _)| r.0 == *table).map(|(_, r)| *r));
+        }
+        // reading order: what is not a cell in drawing order, each table where its first cell was drawn
+        let mut said: Vec<Ref> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for (r, t) in refs.iter().zip(&out.tags) {
+            let r = t.cell.map_or(*r, |c| tables[&c.0]);
+            if seen.insert(r) {
+                said.push(r);
+            }
+        }
+        paragraphs.push(said);
         parents.push(refs);
     }
     {

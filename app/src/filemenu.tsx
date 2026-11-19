@@ -19,7 +19,7 @@ export function FileMenu({ file, section, plugins, livePlugins, setPlugins, runP
   reloadPlugins: () => void;
   fileRef: RefObject<HTMLInputElement | null>;
   /** the dialogs the menu opens, by what they are */
-  open: { restore: () => void; plugins: () => void; sheets: () => void; timeline: () => void; location: () => void; text3d: () => void; keys: () => void; keyEditor: () => void };
+  open: { restore: () => void; plugins: () => void; sheets: () => void; layout: () => void; timeline: () => void; location: () => void; text3d: () => void; keys: () => void; keyEditor: () => void };
 }) {
   const { t, preference, setPreference } = useLocale();
   const [fileMenu, setFileMenu] = useState(false);
@@ -103,6 +103,9 @@ export function FileMenu({ file, section, plugins, livePlugins, setPlugins, runP
           )}
           <hr />
           <button onClick={file.blueprint}>{t("menu.blueprint")}</button>
+          <button onClick={() => open.layout()} title={t("menu.layoutTip")}>
+            {t("menu.layout")}
+          </button>
           <button onClick={() => open.sheets()}>{t("menu.sheets")}</button>
           <button onClick={() => open.timeline()}>{t("menu.timeline")}</button>
           <hr />

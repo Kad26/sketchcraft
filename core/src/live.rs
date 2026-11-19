@@ -221,6 +221,10 @@ impl Live {
                     self.set_notice(format!("Another program saved this model. {}; the rest still work.", what.join(" and ")));
                 }
             }
+            let clamped: Vec<String> = r["sheets_clamped"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default();
+            if !clamped.is_empty() {
+                self.set_notice(format!("Some drawing-sheet content in this file was over SketchCraft's limits and was trimmed to fit ({}). The file itself is unchanged until the model is saved.", clamped.join("; ")));
+            }
             let skipped: Vec<String> = r["skipped_pictures"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default();
             if !skipped.is_empty() {
                 self.set_notice(skipped_text(&skipped));
@@ -443,9 +447,11 @@ impl Live {
             return if matches!(caller, Caller::Ui) { self.restore_command(name, cmd) } else { json!({"ok": false, "error": format!("\"{name}\" isn't available to plugins or agents")}) };
         }
         let origin = Origin::of(caller);
-        // the person edits while a plugin run is open: the run ends here (its work is saved first), so
-        // the person's own edits are never held inside a batch that a crash would lose
-        if self.persist && self.engine.in_batch() && matches!(caller, Caller::Ui) && !matches!(name, "begin_batch" | "end_batch" | "undo" | "redo") && serde_json::from_value::<crate::Command>(cmd.clone()).is_ok_and(|c| c.mutates()) {
+        // the person edits (or opens a batch of their own) while a plugin run or an agent's batch is open: that batch ends
+        // here (its work is saved first, as its own undo step), so the person's edits are never held inside someone
+        // else's batch that a crash would lose. The app's OWN batch is not that: a batch it opened groups its own commands.
+        let person_acts = name == "begin_batch" || (!matches!(name, "end_batch" | "undo" | "redo") && serde_json::from_value::<crate::Command>(cmd.clone()).is_ok_and(|c| c.mutates()));
+        if self.persist && self.engine.person_edit_ends_batch() && matches!(caller, Caller::Ui) && person_acts {
             self.engine.close_batch();
             self.finish_batch();
         }

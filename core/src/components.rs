@@ -20,6 +20,13 @@ pub struct WFace {
     pub color: Option<[f32; 3]>,
     /// material name (look it up in the model, or the component that owns it)
     pub material: Option<String>,
+    /// what a section groups this face's cut under (design §3.4): the innermost tagged owner around the face (its
+    /// group or a parent group, else the nearest tagged placement or a group around it, outward), named by its own
+    /// id when it is in the root model and by the top-level placement's id when it is inside a component; with no
+    /// tag anywhere around it, the face's own group (root) or the top-level placement, as before tags styled cuts
+    pub cut: Id,
+    /// that owner's tag (None: nothing around the face is tagged)
+    pub tag: Option<std::sync::Arc<str>>,
 }
 
 pub struct WEdge {
@@ -84,7 +91,7 @@ impl Model {
 
     pub fn world_faces(&self) -> Vec<WFace> {
         let mut out = Vec::new();
-        self.collect_faces(self, DMat4::IDENTITY, None, None, &Default::default(), &mut out, 0);
+        self.collect_faces(self, DMat4::IDENTITY, None, None, None, &Default::default(), &mut out, 0);
         out
     }
 
@@ -101,11 +108,17 @@ impl Model {
     /// Component lengths.
     fn def_size(root: &Model, def: &crate::model::Definition) -> DVec3 {
         let mut fs = Vec::new();
-        def.model.collect_faces(root, DMat4::IDENTITY, Some(0), None, &Default::default(), &mut fs, 1);
+        def.model.collect_faces(root, DMat4::IDENTITY, Some(0), None, None, &Default::default(), &mut fs, 1);
         let mut it = fs.iter().flat_map(|f| f.outer.iter());
         let Some(first) = it.next() else { return DVec3::ZERO };
         let (lo, hi) = it.fold((*first, *first), |(lo, hi), p| (lo.min(*p), hi.max(*p)));
         hi - lo
+    }
+
+    /// Where a placement's copies sit (none when a Dynamic Component hides it): what bounds work from.
+    pub(crate) fn placement_transforms(root: &Model, inst: &crate::model::Instance, def: &crate::model::Definition) -> Vec<DMat4> {
+        let d = Self::placement(root, inst, def, &Default::default());
+        if d.hidden { Vec::new() } else { d.placements }
     }
 
     /// How a placement draws (copies, stretch, fill, hidden), Dynamic
@@ -118,13 +131,18 @@ impl Model {
 
     /// `root` holds the definitions: components inside components are looked
     /// up there, not in the definition's own (empty) table.
-    fn collect_faces(&self, root: &Model, t: DMat4, owner: Option<Id>, fill: Option<[f32; 3]>, scope: &BTreeMap<String, f64>, out: &mut Vec<WFace>, depth: usize) {
+    ///
+    /// `inh` is the innermost tagged owner around this model (see `WFace::cut`), passed down into components.
+    #[allow(clippy::too_many_arguments)]
+    fn collect_faces(&self, root: &Model, t: DMat4, owner: Option<Id>, fill: Option<[f32; 3]>, inh: Option<&(Id, std::sync::Arc<str>)>, scope: &BTreeMap<String, f64>, out: &mut Vec<WFace>, depth: usize) {
         // a second line behind the checks at import, open and every command: a model that nests too deep, loops or
         // expands to more than the limit still draws (what fits), it never overflows the stack or the memory
         if depth > crate::nesting::MAX_NEST {
             return;
         }
         let mirrored = t.determinant() < 0.0;
+        // each group's innermost tagged owner, worked out once per group (the tag shared, not copied per face)
+        let mut by_group: HashMap<Option<Id>, Option<(Id, std::sync::Arc<str>)>> = HashMap::new();
         for (&id, f) in &self.faces {
             if out.len() >= crate::nesting::MAX_EXPANDED {
                 return;
@@ -135,7 +153,18 @@ impl Model {
             let tp = |vertices: &[Id]| self.placed_loop(vertices, t, mirrored);
             let outer = tp(&f.outer);
             let normal = geom::newell(&outer);
+            // the innermost tagged owner: the face's group (or one around it) here, else what is around this model
+            let tagged = by_group
+                .entry(f.group)
+                .or_insert_with(|| self.tagged_group(f.group).map(|(g, tag)| (owner.unwrap_or(g), tag)).or_else(|| inh.cloned()))
+                .clone();
+            let (cut, tag) = match tagged {
+                Some((c, tag)) => (c, Some(tag)),
+                None => (if owner.is_none() { f.group.unwrap_or(id) } else { owner.unwrap_or(id) }, None),
+            };
             out.push(WFace {
+                cut,
+                tag,
                 owner: owner.unwrap_or(id),
                 group: if owner.is_none() { f.group } else { None },
                 face: owner.is_none().then_some(id),
@@ -155,14 +184,33 @@ impl Model {
                 if d.hidden {
                     continue;
                 }
+                // the placement's own tag, else a tagged group around it here, else what is around this model
+                let here = owner.unwrap_or(iid);
+                let tagged: Option<(Id, std::sync::Arc<str>)> = match &inst.tag {
+                    Some(tag) => Some((here, std::sync::Arc::from(tag.as_str()))),
+                    None => self.tagged_group(inst.parent).map(|(g, tag)| (owner.unwrap_or(g), tag)).or_else(|| inh.cloned()),
+                };
                 for p in &d.placements {
-                    def.model.collect_faces(root, t * *p, Some(owner.unwrap_or(iid)), d.color.or(fill), &d.scope, out, depth + 1);
+                    def.model.collect_faces(root, t * *p, Some(here), d.color.or(fill), tagged.as_ref(), &d.scope, out, depth + 1);
                     if out.len() >= crate::nesting::MAX_EXPANDED {
                         return;
                     }
                 }
             }
         }
+    }
+
+    /// The nearest tagged group, from `g` outward, with its tag.
+    fn tagged_group(&self, mut g: Option<Id>) -> Option<(Id, std::sync::Arc<str>)> {
+        for _ in 0..crate::nesting::MAX_NEST {
+            let id = g?;
+            let grp = self.groups.get(&id)?;
+            if let Some(t) = &grp.tag {
+                return Some((id, std::sync::Arc::from(t.as_str())));
+            }
+            g = grp.parent;
+        }
+        None
     }
 
     /// The tag of a group, or of the nearest group around it that has one.

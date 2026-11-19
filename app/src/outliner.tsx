@@ -10,6 +10,9 @@ import { Icons } from "./icons";
 import { EMPTY, type Sel } from "./selection";
 import { autoTagColor } from "./Viewport";
 import { LineStyleControls } from "./linestyle";
+import { HatchControls } from "./hatchstyle";
+import { CutStyleControls } from "./cutstyle";
+import { CutPriority } from "./cutpriorityeditor";
 
 type Run = (cmd: Record<string, unknown>) => Promise<Reply>;
 
@@ -308,12 +311,15 @@ function Tags({ scene, sel, run, byTag, setByTag }: { scene: Scene; sel: Sel; ru
               </div>
               <div className="tag-line">
                 <LineStyleControls label={`tag ${t}`} none="Default" value={scene.tagStyles?.[t] ?? {}} onChange={(c) => run({ cmd: "tag_style", tag: t, ...c })} />
+                <CutStyleControls tag={t} style={scene.tagStyles?.[t]} run={run} />
+                <HatchControls tag={t} value={scene.tagStyles?.[t]?.cut?.fill === "hatch" ? scene.tagStyles?.[t]?.cut?.hatch : null} run={run} />
               </div>
             </li>
           );
         })}
         {!tags.length && <li className="empty">Tags are layers: give things a tag to show, hide or color them together.</li>}
       </ul>
+      <CutPriority tags={tags.map(([t]) => t)} styles={scene.tagStyles} run={run} />
       <button
         className="btn small ghost new-tag"
         disabled={!taggable.length}

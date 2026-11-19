@@ -11,6 +11,8 @@ export default {
   "menu.plugins": "Estensioni",
   "menu.manage": "Gestisci estensioni…",
   "menu.blueprint": "Crea cianografia (PDF)…",
+  "menu.layout": "Apri in Layout",
+  "menu.layoutTip": "Lo spazio di lavoro Layout: tavole di disegni, in scala",
   "menu.sheets": "Tavole (PDF)…",
   "menu.timeline": "Sequenza temporale (video)…",
   "menu.location": "Aggiungi posizione…",

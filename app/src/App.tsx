@@ -27,7 +27,11 @@ import { prepareImage } from "./textures";
 import { savedSettings } from "./skins";
 import { useLook, type Tab } from "./uselook";
 import { CommandPalette, type Command } from "./palette";
-import { TOOL_INFO, WORKSPACES } from "./workspace";
+import { leftTabs, TOOL_INFO, WORKSPACES } from "./workspace";
+import { useLayout } from "./paper/uselayout";
+import { PagesPanel } from "./paper/PagesPanel";
+import { LayoutStage } from "./paper/LayoutStage";
+import { LayoutInspector } from "./paper/Inspector";
 import { AppearanceDialog, WorkspaceDialog } from "./appearance";
 import { WorkspaceStrip } from "./wsstrip";
 import { Toolbar } from "./toolbar";
@@ -239,6 +243,7 @@ function ModelingApp() {
   };
   const showKeysRef = useRef(false);
   showKeysRef.current = showKeys;
+  const wsIdRef = useRef<string>("model");
 
   // `undo`: the toast carries an Undo button (a plugin run that changed the model)
   const say = useCallback((text: string, bad = false, undo = false) => {
@@ -355,6 +360,14 @@ function ModelingApp() {
     if (t !== "place") setPlacing(null);
   }, []);
   const { skin, wearSkin, wsId, layout, setLayout, ws, editWs, switchWs } = useLook({ tool, chooseTool, setStyles, setTab });
+  // Layout: the paper covers the 3D view, which stays loaded (and paused) underneath
+  const inLayout = wsId === "layout";
+  wsIdRef.current = wsId;
+  const L = useLayout({ active: inLayout, scene, run, say });
+  const openLayout = () => {
+    setShowSheets(false);
+    switchWs("layout");
+  };
 
   const deleteSelection = useCallback(async () => {
     if (isEmpty(sel)) return;
@@ -455,8 +468,9 @@ function ModelingApp() {
         return;
       }
       const k = e.key.toLowerCase();
+      const onPaper = wsIdRef.current === "layout";
       // typing a number starts a measurement (x too once Move is out: "x5" makes 5 copies)
-      if (!e.metaKey && !e.ctrlKey && /^[0-9.\-x/]$/.test(e.key) && !(k === "x" && tool !== "move")) {
+      if (!onPaper && !e.metaKey && !e.ctrlKey && /^[0-9.\-x/]$/.test(e.key) && !(k === "x" && tool !== "move")) {
         setTyped(e.key);
         typedRef.current?.focus();
         e.preventDefault();
@@ -465,6 +479,8 @@ function ModelingApp() {
       if (e.key === "Escape" && showKeysRef.current) return setShowKeys(false);
       const id = commandForCombo(combo, keymap.resolved().byCombo);
       if (!id) return;
+      // on paper, the model's tools and camera keys do nothing (the 3D view is put away); undo, files and menus work
+      if (onPaper && /^(tool:|view\.|edit\.(cut|copy|paste|pasteinplace|selectall|delete|makecomponent))/.test(id)) return;
       e.preventDefault();
       if (id === "help.shortcuts") return setShowKeys((v) => !v);
       commandsRef.current().find((c) => c.id === id)?.run();
@@ -488,6 +504,7 @@ function ModelingApp() {
       { id: "file.render", label: "Render…", hint: "Photoreal render", run: () => setShowRender(true) },
       { id: "file.timeline", label: "Timeline (video)…", hint: "Turntables, walkthroughs, sun studies", run: () => setShowTimeline(true) },
       { label: "Drawing sheets (PDF)…", hint: "File", run: () => setShowSheets(true) },
+      { label: "Open in Layout", hint: "Pages of drawings: lay out, reorder, set scale and opacity", run: openLayout },
       { label: "Make blueprint (PDF)…", hint: "File", run: file.blueprint },
       { label: "Add location…", hint: "Terrain and map imagery", run: () => setShowLocation(true) },
       { label: "3D Text…", hint: "File", run: () => setShowText3d(true) },
@@ -562,7 +579,7 @@ function ModelingApp() {
   const selCount = selIds(sel).length;
 
   return (
-    <div className={`app ${ws.showLeft ? "" : "no-left"} ${ws.showRight ? "" : "no-right"} ${ws.dock === "left" ? "dock-left" : ws.dock === "classic" ? "dock-classic" : ""} ${layout === "side" ? "panels-right" : ""}`}>
+    <div className={`app ${inLayout ? "ws-layout" : ""} ${ws.showLeft ? "" : "no-left"} ${ws.showRight ? "" : "no-right"} ${ws.dock === "left" ? "dock-left" : ws.dock === "classic" ? "dock-classic" : ""} ${layout === "side" ? "panels-right" : ""}`}>
       <header className="topbar" data-tauri-drag-region>
         <div className="brand" data-tauri-drag-region>
           <Logo />
@@ -577,7 +594,7 @@ function ModelingApp() {
             runPluginCommand={runPluginCommand}
             reloadPlugins={reloadPlugins}
             fileRef={fileRef}
-            open={{ restore: () => setShowRestore(true), plugins: () => setShowPlugins(true), sheets: () => setShowSheets(true), timeline: () => setShowTimeline(true), location: () => setShowLocation(true), text3d: () => setShowText3d(true), keys: () => setShowKeys(true), keyEditor: () => setShowKeyEditor(true) }}
+            open={{ restore: () => setShowRestore(true), plugins: () => setShowPlugins(true), sheets: () => setShowSheets(true), layout: openLayout, timeline: () => setShowTimeline(true), location: () => setShowLocation(true), text3d: () => setShowText3d(true), keys: () => setShowKeys(true), keyEditor: () => setShowKeyEditor(true) }}
           />
           <span className="doc">{docName}</span>
           <span className="live" title="Claude can edit this model over MCP; changes show up here">
@@ -622,13 +639,14 @@ function ModelingApp() {
 
       <aside className="panel left">
         <div className="tabs">
-          {(["outliner", "library", "views"] as Tab[]).map((t) => (
+          {(leftTabs(wsId) as Tab[]).map((t) => (
             <button key={t} className={tab === t ? "on" : ""} onClick={() => setTab(t)}>
-              {t === "outliner" ? "Outliner" : t === "library" ? "Library" : "Views"}
+              {t === "outliner" ? "Outliner" : t === "library" ? "Library" : t === "pages" ? "Pages" : "Views"}
             </button>
           ))}
         </div>
         <div className="section grow">
+          {tab === "pages" && <PagesPanel L={L} />}
           {scene && tab === "outliner" && <Outliner scene={scene} sel={sel} setSel={setSel} run={run} byTag={!!styles.byTag} setByTag={(on) => setStyles((s) => ({ ...s, byTag: on }))} />}
           {scene && tab === "library" && (
             <>
@@ -707,14 +725,18 @@ function ModelingApp() {
             setSectionTick((t) => t + 1);
           }}
           api={api}
+          paused={inLayout}
           pluginTool={
             tool === "plugin" && pluginTool
               ? { ...pluginTool, move: (at) => toolSession.current?.move(at), click: (at) => toolSession.current?.click(at) }
               : null
           }
         />
+        {inLayout && <LayoutStage L={L} />}
         {matching && <MatchPhoto src={matching.src} width={matching.width} height={matching.height} defaultName={`Photo ${(scene?.views.filter((v) => v.photo).length ?? 0) + 1}`} onDone={finishMatch} onCancel={() => setMatching(null)} />}
 
+        {!inLayout && (
+        <>
         <Toolbar groups={ws.tools} tool={tool} choose={(id) => chooseTool(id as Tool)} vertical={ws.dock === "left"} iconStyle={layout === "side" ? "workshop" : "default"} onCustomize={() => setShowWs(true)} extra={pluginButtons}>
           <label className="chip" style={{ background: hex(color) }} title="Paint color">
             <input type="color" value={hex(color)} onChange={(e) => (setColor(unhex(e.target.value)), chooseTool("paint"))} />
@@ -808,8 +830,10 @@ function ModelingApp() {
           <label>{measure.label || "Value"}</label>
           <input ref={typedRef} value={typed} placeholder={measure.value || "type, then Enter"} onChange={(e) => setTyped(e.target.value)} onKeyDown={(e) => e.key === "Escape" && (setTyped(""), typedRef.current?.blur())} />
         </form>
+        </>
+        )}
 
-        {scene && !showTimeline && (
+        {scene && !showTimeline && !inLayout && (
           <WorkspaceStrip
             ws={wsId}
             scene={scene}
@@ -822,7 +846,7 @@ function ModelingApp() {
               setSection(on);
               setSectionTick((t) => t + 1);
             }}
-            actions={{ blueprint: file.blueprint, sheets: () => setShowSheets(true), location: () => setShowLocation(true), render: () => setShowRender(true), animation: () => setShowTimeline((v) => !v), showView: (v) => showView(v), sceneProps }}
+            actions={{ blueprint: file.blueprint, sheets: () => setShowSheets(true), layout: openLayout, location: () => setShowLocation(true), render: () => setShowRender(true), animation: () => setShowTimeline((v) => !v), showView: (v) => showView(v), sceneProps }}
           />
         )}
         <UpdateCard />
@@ -908,6 +932,7 @@ function ModelingApp() {
           <SheetsDialog
             scene={scene}
             onClose={() => setShowSheets(false)}
+            onLayout={openLayout}
             onMake={async (spec) => {
               const path = await pickSave(`${spec.project} sheets.pdf`, "pdf", "PDF");
               if (!path) return;
@@ -922,6 +947,9 @@ function ModelingApp() {
       </main>
 
       <aside className="panel right">
+        {inLayout && scene && <LayoutInspector page={L.page} viewport={L.viewport} item={L.item} scene={scene} run={run} setViewport={L.setViewport} setItem={L.setItem} />}
+        {!inLayout && (
+        <>
         {scene && selCount > 0 && <EntityInfo scene={scene} sel={sel} run={run} />}
         {selCount === 0 && (
           <div className="section">
@@ -1073,6 +1101,8 @@ function ModelingApp() {
             Each tool tells you what to do next, top-left of the model. Press <b>?</b> for every shortcut.
           </p>
         </div>
+        </>
+        )}
       </aside>
     </div>
   );

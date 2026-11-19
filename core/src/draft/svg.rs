@@ -15,9 +15,16 @@ fn rgb(c: Rgb) -> String {
     format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2])
 }
 
+/// A character XML text may hold as it is: not a control (but a line break), and not a Unicode non-character
+/// (U+FFFE, U+FFFF, U+FDD0 to U+FDEF, and the last two of every plane), which XML refuses or discourages.
+fn xml_char(c: char) -> bool {
+    let n = c as u32;
+    (!c.is_control() || c == '\n') && !(0xFDD0..=0xFDEF).contains(&n) && (n & 0xFFFE) != 0xFFFE
+}
+
 fn esc(s: &str) -> String {
     s.chars()
-        .filter(|c| !c.is_control() || *c == '\n')
+        .filter(|c| xml_char(*c))
         .map(|c| match c {
             '&' => "&amp;".to_string(),
             '<' => "&lt;".to_string(),
@@ -37,7 +44,7 @@ struct W {
 
 impl W {
     fn prims(&mut self, items: &[Prim]) {
-        for p in items {
+        for p in expanded(items).iter() {
             match p {
                 Prim::Path(p) => self.path(p),
                 Prim::Text(t) => {
@@ -54,18 +61,58 @@ impl W {
                     let _ = writeln!(self.s, "<image x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" preserveAspectRatio=\"none\" href=\"data:image/png;base64,{b64}\"/>", n(i.rect[0]), n(i.rect[1]), n(i.rect[2]), n(i.rect[3]));
                 }
                 Prim::Group(g) => {
+                    let op = if g.opacity < 1.0 { format!(" opacity=\"{}\"", n(g.opacity.max(0.0))) } else { String::new() };
                     if let Some([x, y, w, h]) = g.clip {
                         self.clips += 1;
                         let id = format!("sc-{}-c{}", self.uid, self.clips);
-                        let _ = writeln!(self.s, "<clipPath id=\"{id}\"><rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\"/></clipPath>\n<g clip-path=\"url(#{id})\">", n(x), n(y), n(w), n(h));
+                        let _ = writeln!(self.s, "<clipPath id=\"{id}\"><rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\"/></clipPath>\n<g clip-path=\"url(#{id})\"{op}>", n(x), n(y), n(w), n(h));
                     } else {
-                        self.s.push_str("<g>\n");
+                        let _ = writeln!(self.s, "<g{op}>");
                     }
                     self.prims(&g.children);
                     self.s.push_str("</g>\n");
                 }
+                Prim::Hatch(h) => self.hatch(h),
+                // (opened by `expanded`)
+                Prim::Lines(_) => {}
             }
         }
+    }
+
+    /// A hatched region: its lines in a group clipped to the region (even-odd), or the tint when it has one.
+    fn hatch(&mut self, h: &HatchPrim) {
+        let mut ring = String::new();
+        for s in h.ring_segs() {
+            let _ = match s {
+                Seg::M(a) => write!(ring, "M{} {}", n(a[0]), n(a[1])),
+                Seg::L(a) => write!(ring, "L{} {}", n(a[0]), n(a[1])),
+                Seg::Z => write!(ring, "Z"),
+                Seg::C(..) => Ok(()),
+            };
+        }
+        if ring.is_empty() {
+            return;
+        }
+        let name = esc(&h.name);
+        if let Some(t) = h.tint {
+            let _ = writeln!(self.s, "<path data-hatch=\"{name}\" data-hatch-tint=\"1\" d=\"{ring}\" fill=\"{}\" fill-rule=\"evenodd\"/>", rgb(t));
+            return;
+        }
+        if h.lines.is_empty() {
+            return;
+        }
+        self.clips += 1;
+        let id = format!("sc-{}-c{}", self.uid, self.clips);
+        let mut d = String::with_capacity(h.lines.len() * 24);
+        for [a, b] in &h.lines {
+            let _ = write!(d, "M{} {}L{} {}", n(a[0]), n(a[1]), n(b[0]), n(b[1]));
+        }
+        let _ = writeln!(
+            self.s,
+            "<clipPath id=\"{id}\"><path d=\"{ring}\" clip-rule=\"evenodd\"/></clipPath>\n<g data-hatch=\"{name}\" clip-path=\"url(#{id})\"><path d=\"{d}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{}\" stroke-linecap=\"round\"/></g>",
+            rgb(h.pen.rgb),
+            n(h.pen.w)
+        );
     }
 
     fn path(&mut self, p: &PathPrim) {

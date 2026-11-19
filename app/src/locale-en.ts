@@ -11,6 +11,8 @@ export default {
   "menu.plugins": "Plugins",
   "menu.manage": "Manage plugins…",
   "menu.blueprint": "Make blueprint (PDF)…",
+  "menu.layout": "Open in Layout",
+  "menu.layoutTip": "The Layout workspace: pages of drawings, to scale",
   "menu.sheets": "Drawing sheets (PDF)…",
   "menu.timeline": "Timeline (video)…",
   "menu.location": "Add location…",

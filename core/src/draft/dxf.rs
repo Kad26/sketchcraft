@@ -105,7 +105,7 @@ impl W {
     }
 
     fn prims(&mut self, items: &[Prim]) {
-        for p in items {
+        for p in expanded(items).iter() {
             match p {
                 Prim::Path(p) => {
                     let subs = flatten(&p.segs);
@@ -141,6 +141,9 @@ impl W {
                     for c in t.text.chars() {
                         if c.is_control() {
                             s.push(' ');
+                        } else if c == '\\' {
+                            // a backslash starts a DXF text code: written as its own character code, it stays a backslash
+                            s.push_str("\\U+005C");
                         } else if (c as u32) < 128 {
                             s.push(c);
                         } else {
@@ -157,10 +160,69 @@ impl W {
                     self.g(7, "Standard");
                     self.g(100, "AcDbText");
                 }
-                Prim::Image(_) => {}
+                // (opened by `expanded`)
+                Prim::Image(_) | Prim::Lines(_) => {}
                 Prim::Group(g) => self.prims(&g.children),
+                Prim::Hatch(h) => {
+                    let rings: Vec<(Vec<[f64; 2]>, bool)> = h.rings.iter().filter(|r| r.len() >= 3).map(|r| (r.clone(), true)).collect();
+                    if rings.is_empty() {
+                        continue;
+                    }
+                    match h.tint {
+                        Some(t) => self.hatch(&rings, t),
+                        None if !h.families.is_empty() => self.pattern_hatch(h, &rings),
+                        None => {}
+                    }
+                }
             }
         }
+    }
+
+    /// A native pattern `HATCH`: the region's boundary and the pattern's line families (already scaled and turned,
+    /// in the drawing's frame, as the format stores them), so a CAD program draws and edits it as a hatch.
+    fn pattern_hatch(&mut self, h: &HatchPrim, rings: &[(Vec<[f64; 2]>, bool)]) {
+        let pen = Pen::new(h.pen.w, h.pen.rgb);
+        self.ent("HATCH", "AcDbHatch", Some(&pen), None);
+        self.g(10, 0);
+        self.g(20, 0);
+        self.g(30, 0);
+        self.g(210, 0);
+        self.g(220, 0);
+        self.g(230, 1);
+        let name: String = h.name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c.to_ascii_uppercase() } else { '_' }).collect();
+        self.g(2, if name.is_empty() { "SC_HATCH".to_string() } else { name });
+        self.g(70, 0); // a pattern, not a solid fill
+        self.g(71, 0);
+        self.g(91, rings.len());
+        for (i, (pts, _)) in rings.iter().enumerate() {
+            self.g(92, if i == 0 { 3 } else { 2 }); // polyline; the first is the outer boundary
+            self.g(72, 0);
+            self.g(73, 1);
+            self.g(93, pts.len());
+            for q in pts {
+                self.g(10, q[0]);
+                self.g(20, self.y(q[1]));
+            }
+            self.g(97, 0);
+        }
+        self.g(75, 0); // odd parity: holes stay open
+        self.g(76, 2); // a custom pattern (its lines follow)
+        self.g(52, h.angle);
+        self.g(41, h.scale);
+        self.g(77, 0);
+        self.g(78, h.families.len());
+        for f in &h.families {
+            self.g(53, f.angle);
+            self.g(43, f.base[0]);
+            self.g(44, f.base[1]);
+            self.g(45, f.offset[0]);
+            self.g(46, f.offset[1]);
+            self.g(79, f.dash.len());
+            for d in &f.dash {
+                self.g(49, *d);
+            }
+        }
+        self.g(98, 0);
     }
 
     fn hatch(&mut self, subs: &[(Vec<[f64; 2]>, bool)], rgb: Rgb) {
@@ -267,6 +329,17 @@ impl W {
         self.g(76, 1);
         self.g(330, block);
     }
+}
+
+/// How many drawings on the page are faded: a DXF has no opacity, so it draws them at full strength.
+pub fn dropped_opacity(p: &Page) -> usize {
+    let mut n = 0;
+    p.visit(&mut |x| {
+        if matches!(x, Prim::Group(g) if g.opacity < 1.0) {
+            n += 1;
+        }
+    });
+    n
 }
 
 /// One page as a DXF (AC1015) file's text.
